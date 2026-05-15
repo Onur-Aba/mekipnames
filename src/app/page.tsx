@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle2, Hand, Search, Users, ShieldAlert, Crown, Copy, Settings, ArrowRight, AlertTriangle, ThumbsUp, ThumbsDown, X, Play, LogIn, Lock, Unlock, UserPlus, Info, ScrollText, LogOut, Clock, MessageSquare, Eye, EyeOff, Pencil, Sparkles, RotateCcw, Swords } from 'lucide-react';
+import { CheckCircle2, Hand, Search, Users, ShieldAlert, Crown, Copy, Settings, ArrowRight, AlertTriangle, ThumbsUp, ThumbsDown, X, Play, LogIn, Lock, Unlock, UserPlus, Info, ScrollText, LogOut, Clock, MessageSquare, Eye, EyeOff, Pencil, Sparkles, RotateCcw, Swords, FastForward } from 'lucide-react';
 import { Player, Room, Card, Team, Role } from '@/types';
 import bcrypt from 'bcryptjs';
 
@@ -31,11 +31,18 @@ export default function CodenamesGame() {
   const [showTurnBanner, setShowTurnBanner] = useState<Team | null>(null);
   const prevTurnRef = useRef<Team | null>(null);
 
+  // YAZIYA GİZLİCE BAKMA (PEEKING) İÇİN LOKAL STATE
+  const [peekedCards, setPeekedCards] = useState<Set<number>>(new Set());
+
   const roomRef = useRef<any>(null);
   useEffect(() => { roomRef.current = room; }, [room]);
 
-  // ORTAK DEĞİŞKEN 
+  // ORTAK DEĞİŞKENLER (Hata çözümü için tüm fonksiyonların erişebileceği en üste taşındı)
   const mePlayer = room?.players?.find((p: any) => p.sessionId === sessionId);
+  const isMyTurn = room?.currentTurn === mePlayer?.team;
+  const isSpymasterTurn = room?.turnPhase === 'spymaster';
+  const isOperativeTurn = room?.turnPhase === 'operative';
+  const isGameOver = room?.status?.includes('_won') || false;
 
   // ODA OLUŞTURMA
   const [createName, setCreateName] = useState('');
@@ -234,6 +241,7 @@ export default function CodenamesGame() {
         // Lobiye Dönüş Durumu
         if (payload.room.status === 'waiting' && view === 'playing') {
             hasDealtRef.current = false;
+            setPeekedCards(new Set()); // Kart bakma durumlarını sıfırla
             setView('lobby');
         }
 
@@ -451,7 +459,8 @@ export default function CodenamesGame() {
     const colors = [...Array(9).fill('red'), ...Array(8).fill('blue'), ...Array(7).fill('neutral'), 'assassin'].sort(() => 0.5 - Math.random());
 
     const cards: Card[] = selectedWords.map((word, i) => ({
-      id: i, word, color: colors[i] as any, revealed: false, votes: []
+      // Tasarımın rastgele seçilmesi için karta 1 ile 10 arasında random bir sayı atıyoruz
+      id: i, word, color: colors[i] as any, revealed: false, votes: [], designId: Math.floor(Math.random() * 10) + 1 
     }));
 
     const updatedRoom = { 
@@ -481,6 +490,20 @@ export default function CodenamesGame() {
     setMeetingView(false);
   };
 
+  const skipTurn = () => {
+      if (!room || !isMyTurn || room.turnPhase !== 'operative') return;
+      
+      let updatedRoom = { ...room };
+      const log = { id: Date.now(), type: 'pass', team: updatedRoom.currentTurn, playerName: mePlayer?.name || 'Ajan', word: 'PAS GEÇİLDİ' };
+      updatedRoom.gameLogs = [...(updatedRoom.gameLogs || []), log];
+
+      updatedRoom.turnPhase = 'spymaster';
+      updatedRoom.currentTurn = updatedRoom.currentTurn === 'red' ? 'blue' : 'red';
+      updatedRoom.currentClue = null;
+      
+      broadcastSync(updatedRoom);
+  };
+
   // OYUN İÇİ FONKSİYONLARI VE LOG EKLENTİSİ
   const voteCard = (cardId: number) => {
     if (!room || room.turnPhase !== 'operative') return;
@@ -499,7 +522,7 @@ export default function CodenamesGame() {
 
     let updatedRoom = { ...room };
     
-    const log = { id: Date.now(), type: 'reveal', team: updatedRoom.currentTurn, playerName: mePlayer?.name || 'Ajan', word: card.word, color: card.color };
+    const log = { id: Date.now(), type: 'reveal', team: updatedRoom.currentTurn, playerName: mePlayer?.name || 'Ajan', word: card.word, color: card.color, relatedClue: updatedRoom.currentClue?.word };
     updatedRoom.gameLogs = [...(updatedRoom.gameLogs || []), log];
 
     const updatedCards = updatedRoom.cards.map((c: any) => {
@@ -508,7 +531,7 @@ export default function CodenamesGame() {
     });
     updatedRoom.cards = updatedCards;
     
-    // GÜNCELLENMİŞ TAHMİN HAKKI KONTROLÜ
+    // TAHMİN HAKKI KONTROLÜ VE AZALTILMASI
     updatedRoom.guessesLeft--;
 
     if (card.color === 'assassin') {
@@ -541,8 +564,8 @@ export default function CodenamesGame() {
     const updatedRoom = {
       ...room,
       currentClue: { word: clueWord.toUpperCase(), count: clueCount },
-      // Tahmin hakkı: Şefin verdiği sayı + 1 ekstra hak
-      guessesLeft: clueCount === 'unlimited' ? 99 : (clueCount as number) + 1,
+      // Tahmin hakkı: Şefin verdiği tam sayı kadar (ekstra +1 yok)
+      guessesLeft: clueCount === 'unlimited' ? 99 : (clueCount as number),
       turnPhase: 'operative' as const
     };
 
@@ -557,6 +580,7 @@ export default function CodenamesGame() {
   const returnToLobby = () => {
     if (!room || !mePlayer?.isHost) return;
     hasDealtRef.current = false;
+    setPeekedCards(new Set()); // Bütün bakılan kartları sıfırla
     const updatedRoom = { 
         ...room, 
         status: 'waiting',
@@ -590,7 +614,7 @@ export default function CodenamesGame() {
     return (
       <div className="min-h-screen bg-[#0A070E] flex items-center justify-center p-4 relative overflow-hidden text-white">
         {/* MekipHub Neon Background */}
-        <div className="neon-bg absolute inset-0 pointer-events-none">
+        <div className="neon-bg absolute inset-0 pointer-events-none z-0">
           <div className="neon-stars neon-stars-1"></div>
           <div className="neon-stars neon-stars-2"></div>
           <div className="neon-stars neon-stars-3"></div>
@@ -732,12 +756,12 @@ export default function CodenamesGame() {
           {showLeaveConfirm && (
             <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4 backdrop-blur-md">
                <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-[#110D17] border border-white/10 rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl">
-                  <AlertTriangle size={48} className="text-fuchsia-500 mx-auto mb-4" />
+                  <AlertTriangle size={48} className="text-red-500 mx-auto mb-4" />
                   <h3 className="text-2xl font-black text-white mb-2">Ayrılmak İstiyor Musunuz?</h3>
                   <p className="text-white/60 mb-8 font-medium">Oda bağlantınız kesilecek ve lobi listesine döneceksiniz.</p>
                   <div className="flex gap-4">
                      <button onClick={() => setShowLeaveConfirm(false)} className="flex-1 bg-white/10 hover:bg-white/20 text-white font-bold py-3 rounded-xl transition-colors">Hayır, Kal</button>
-                     <button onClick={leaveRoom} className="flex-1 bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-bold py-3 rounded-xl transition-colors shadow-[0_0_15px_rgba(217,70,239,0.3)]">Evet, Ayrıl</button>
+                     <button onClick={leaveRoom} className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition-colors shadow-[0_0_15px_rgba(239,68,68,0.3)]">Evet, Ayrıl</button>
                   </div>
                </motion.div>
             </div>
@@ -755,19 +779,19 @@ export default function CodenamesGame() {
                      broadcastSync({ ...room, isMeetingActive: false });
                  }} className="absolute top-8 right-8 text-white/50 hover:text-white z-50"><X size={40}/></button>
               )}
-              <h2 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-violet-300 to-fuchsia-300 text-center mb-16 tracking-tighter relative z-10">EKİP TANIŞMA</h2>
+              <h2 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-violet-300 to-red-400 text-center mb-16 tracking-tighter relative z-10">EKİP TANIŞMA</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-10 max-w-7xl mx-auto relative z-10">
                 {/* KIRMIZI */}
                 <div className="space-y-4">
-                   <h3 className="text-3xl font-black text-fuchsia-400 border-b-2 border-fuchsia-900/50 pb-2">{localRedName}</h3>
+                   <h3 className="text-3xl font-black text-red-500 border-b-2 border-red-900/50 pb-2">{localRedName}</h3>
                    {redTeam.map((p: any) => (
-                     <div key={p.sessionId} onClick={() => startMeetingIntro(p)} className={`p-6 bg-white/[0.04] backdrop-blur-md rounded-2xl border transition-all ${mePlayer?.isHost ? 'cursor-pointer hover:border-fuchsia-500/50 hover:bg-white/[0.08]' : 'cursor-default'} ${introTarget?.sessionId === p.sessionId ? 'border-cyan-400 scale-105 shadow-[0_0_30px_rgba(34,211,238,0.2)]' : 'border-white/10'} ${meetingResults[p.sessionId] ? 'opacity-50' : ''}`}>
+                     <div key={p.sessionId} onClick={() => startMeetingIntro(p)} className={`p-6 bg-white/[0.04] backdrop-blur-md rounded-2xl border transition-all ${mePlayer?.isHost ? 'cursor-pointer hover:border-red-500/50 hover:bg-white/[0.08]' : 'cursor-default'} ${introTarget?.sessionId === p.sessionId ? 'border-cyan-400 scale-105 shadow-[0_0_30px_rgba(34,211,238,0.2)]' : 'border-white/10'} ${meetingResults[p.sessionId] ? 'opacity-50' : ''}`}>
                         <div className="flex justify-between items-center">
                           <span className="text-2xl font-bold text-white">{p.name}</span>
                           {meetingResults[p.sessionId] && (
                             <div className="flex gap-4 text-sm font-black">
                               <span className="text-cyan-400">L: {meetingResults[p.sessionId].lobbyLikes}</span>
-                              <span className="text-fuchsia-400">D: {meetingResults[p.sessionId].lobbyDislikes}</span>
+                              <span className="text-red-500">D: {meetingResults[p.sessionId].lobbyDislikes}</span>
                               <span className="text-violet-400">K: %{meetingResults[p.sessionId].kickPercent}</span>
                             </div>
                           )}
@@ -779,13 +803,13 @@ export default function CodenamesGame() {
                 <div className="space-y-4">
                    <h3 className="text-3xl font-black text-cyan-400 border-b-2 border-cyan-900/50 pb-2">{localBlueName}</h3>
                    {blueTeam.map((p: any) => (
-                     <div key={p.sessionId} onClick={() => startMeetingIntro(p)} className={`p-6 bg-white/[0.04] backdrop-blur-md rounded-2xl border transition-all ${mePlayer?.isHost ? 'cursor-pointer hover:border-cyan-500/50 hover:bg-white/[0.08]' : 'cursor-default'} ${introTarget?.sessionId === p.sessionId ? 'border-fuchsia-400 scale-105 shadow-[0_0_30px_rgba(217,70,239,0.2)]' : 'border-white/10'} ${meetingResults[p.sessionId] ? 'opacity-50' : ''}`}>
+                     <div key={p.sessionId} onClick={() => startMeetingIntro(p)} className={`p-6 bg-white/[0.04] backdrop-blur-md rounded-2xl border transition-all ${mePlayer?.isHost ? 'cursor-pointer hover:border-cyan-500/50 hover:bg-white/[0.08]' : 'cursor-default'} ${introTarget?.sessionId === p.sessionId ? 'border-red-500 scale-105 shadow-[0_0_30px_rgba(239,68,68,0.2)]' : 'border-white/10'} ${meetingResults[p.sessionId] ? 'opacity-50' : ''}`}>
                         <div className="flex justify-between items-center">
                           <span className="text-2xl font-bold text-white">{p.name}</span>
                           {meetingResults[p.sessionId] && (
                             <div className="flex gap-4 text-sm font-black">
                               <span className="text-cyan-400">L: {meetingResults[p.sessionId].lobbyLikes}</span>
-                              <span className="text-fuchsia-400">D: {meetingResults[p.sessionId].lobbyDislikes}</span>
+                              <span className="text-red-500">D: {meetingResults[p.sessionId].lobbyDislikes}</span>
                               <span className="text-violet-400">K: %{meetingResults[p.sessionId].kickPercent}</span>
                             </div>
                           )}
@@ -823,8 +847,8 @@ export default function CodenamesGame() {
                         </div>
                       </div>
                       <div className="relative">
-                        <button onClick={() => castLobbyVote('dislike')} className={`p-8 rounded-full border-2 transition-all ${lobbyVotes[sessionId] === 'dislike' ? 'bg-fuchsia-500/20 border-fuchsia-400 text-fuchsia-300 shadow-[0_0_20px_rgba(217,70,239,0.3)]' : 'bg-white/5 border-white/10 text-white/40 hover:text-white hover:bg-white/10'}`}><ThumbsDown size={48}/></button>
-                        <div className="absolute -top-3 -right-6 bg-[#110D17] text-fuchsia-400 px-3 py-1 rounded-full text-xs font-bold border border-fuchsia-500/30 shadow-lg">
+                        <button onClick={() => castLobbyVote('dislike')} className={`p-8 rounded-full border-2 transition-all ${lobbyVotes[sessionId] === 'dislike' ? 'bg-red-500/20 border-red-500 text-red-500 shadow-[0_0_20px_rgba(239,68,68,0.3)]' : 'bg-white/5 border-white/10 text-white/40 hover:text-white hover:bg-white/10'}`}><ThumbsDown size={48}/></button>
+                        <div className="absolute -top-3 -right-6 bg-[#110D17] text-red-500 px-3 py-1 rounded-full text-xs font-bold border border-red-500/30 shadow-lg">
                           {Object.entries(lobbyVotes).filter(([_, v]) => v === 'dislike').length} Oy
                         </div>
                       </div>
@@ -832,9 +856,9 @@ export default function CodenamesGame() {
                     <div className="bg-black/40 p-6 rounded-2xl border border-white/10">
                        <div className="flex justify-between mb-3 font-bold text-sm">
                          <span className="text-cyan-400">👍 {kickVotes.likes} (Chate 1)</span>
-                         <span className="text-fuchsia-400">👎 {kickVotes.dislikes} (Chate 0)</span>
+                         <span className="text-red-500">👎 {kickVotes.dislikes} (Chate 0)</span>
                        </div>
-                       <div className="h-6 bg-fuchsia-500/20 rounded-full overflow-hidden flex border border-white/5">
+                       <div className="h-6 bg-red-500/20 rounded-full overflow-hidden flex border border-white/5">
                          <motion.div animate={{ width: `${(kickVotes.likes + kickVotes.dislikes) === 0 ? 50 : (kickVotes.likes / (kickVotes.likes + kickVotes.dislikes)) * 100}%` }} className="h-full bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.8)]"/>
                        </div>
                     </div>
@@ -880,8 +904,18 @@ export default function CodenamesGame() {
                
                <div className="flex gap-3">
                   <span className="bg-white/5 border border-white/10 px-5 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 text-white"><Users size={18} className="text-cyan-400"/> {room.players.length} Ajan</span>
-                  <span className="bg-white/5 border border-white/10 px-5 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 text-white"><Settings size={18} className="text-violet-400"/> {mePlayer?.name}</span>
-                  <button onClick={() => setShowLeaveConfirm(true)} className="bg-fuchsia-500/10 text-fuchsia-400 border border-fuchsia-500/20 hover:bg-fuchsia-500 hover:text-white px-5 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 transition-all"><LogOut size={18}/> Çıkış</button>
+                  
+                  {/* TAKIM VE ROL VURGUSU */}
+                  <span className={`border px-5 py-3 rounded-2xl text-lg font-black flex items-center gap-2 uppercase tracking-wide shadow-lg
+                    ${mePlayer?.team === 'red' ? 'bg-red-500/20 border-red-500/50 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : 
+                      mePlayer?.team === 'blue' ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.2)]' : 
+                      'bg-white/5 border-white/10 text-white'}
+                  `}>
+                      {mePlayer?.role === 'spymaster' ? <Settings size={22} className="animate-spin-slow"/> : <Search size={22}/>} 
+                      {mePlayer?.name} <span className="text-[10px] opacity-60 font-medium tracking-normal ml-1">({mePlayer?.role === 'spymaster' ? 'Şef' : 'Ajan'})</span>
+                  </span>
+
+                  <button onClick={() => setShowLeaveConfirm(true)} className="bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500 hover:text-white px-5 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 transition-all"><LogOut size={18}/> Çıkış</button>
                </div>
             </header>
 
@@ -892,35 +926,35 @@ export default function CodenamesGame() {
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {/* KIRMIZI TAKIM KARTI */}
                       <div className="bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-[24px] p-6 h-fit shadow-xl relative overflow-hidden group">
-                         <div className="absolute -right-20 -top-20 h-40 w-40 rounded-full bg-fuchsia-500/10 blur-3xl transition group-hover:bg-fuchsia-500/20"></div>
+                         <div className="absolute -right-20 -top-20 h-40 w-40 rounded-full bg-red-500/10 blur-3xl transition group-hover:bg-red-500/20"></div>
                          <div className="flex justify-between items-center mb-6 relative z-10">
                             <div className="flex items-center gap-3 w-full">
-                               <div className="w-4 h-4 rounded-full bg-fuchsia-500 shadow-[0_0_12px_rgba(217,70,239,0.8)] shrink-0"></div>
+                               <div className="w-4 h-4 rounded-full bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.8)] shrink-0"></div>
                                {isEditingRed ? (
-                                   <input autoFocus value={localRedName} onChange={(e) => setLocalRedName(e.target.value)} onBlur={() => { setIsEditingRed(false); broadcastSync({...room, settings: {...room.settings, redName: localRedName}}); }} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} className="bg-black/50 text-white font-black text-xl w-full border border-fuchsia-500/50 rounded-lg px-3 py-1 outline-none uppercase tracking-wide focus:ring-2 focus:ring-fuchsia-500/50"/>
+                                   <input autoFocus value={localRedName} onChange={(e) => setLocalRedName(e.target.value)} onBlur={() => { setIsEditingRed(false); broadcastSync({...room, settings: {...room.settings, redName: localRedName}}); }} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} className="bg-black/50 text-white font-black text-xl w-full border border-red-500/50 rounded-lg px-3 py-1 outline-none uppercase tracking-wide focus:ring-2 focus:ring-red-500/50"/>
                                ) : (
                                    <div className="flex items-center gap-2 group/edit flex-1">
                                        <span className="text-white font-black text-2xl uppercase tracking-wide truncate max-w-[12rem] drop-shadow-md">{localRedName}</span>
                                        {mePlayer?.isHost && (
-                                           <button onClick={() => setIsEditingRed(true)} className="text-white/30 hover:text-fuchsia-400 transition-colors"><Pencil size={16}/></button>
+                                           <button onClick={() => setIsEditingRed(true)} className="text-white/30 hover:text-red-400 transition-colors"><Pencil size={16}/></button>
                                        )}
                                    </div>
                                )}
                             </div>
                             <div className="flex items-center gap-3 shrink-0 ml-2">
-                               <span className="bg-fuchsia-500/10 text-fuchsia-300 px-3 py-1.5 rounded-xl text-xs font-bold border border-fuchsia-500/20">{redTeam.length} Üye</span>
-                               {mePlayer?.team !== 'red' && <button onClick={() => switchRole('red', 'operative')} className="bg-fuchsia-600 hover:bg-fuchsia-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-[0_0_10px_rgba(217,70,239,0.4)]">KATIL</button>}
+                               <span className="bg-red-500/10 text-red-400 px-3 py-1.5 rounded-xl text-xs font-bold border border-red-500/20">{redTeam.length} Üye</span>
+                               {mePlayer?.team !== 'red' && <button onClick={() => switchRole('red', 'operative')} className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-[0_0_10px_rgba(239,68,68,0.4)]">KATIL</button>}
                             </div>
                          </div>
                          <div className="grid grid-cols-2 gap-3 relative z-10">
                             {hasRedSpymaster ? (
-                               <div className="bg-fuchsia-950/40 border border-fuchsia-500/30 rounded-xl p-3 flex justify-center items-center relative h-14 shadow-inner">
+                               <div className="bg-red-950/40 border border-red-500/30 rounded-xl p-3 flex justify-center items-center relative h-14 shadow-inner">
                                   <span className="text-white font-bold text-sm text-center">{redTeam.find((p:any)=>p.role==='spymaster')?.name}</span>
-                                  <span className="absolute -top-2.5 left-4 bg-fuchsia-600 px-2 py-0.5 rounded-md text-[10px] text-white font-black tracking-widest shadow-md">ŞEF</span>
+                                  <span className="absolute -top-2.5 left-4 bg-red-600 px-2 py-0.5 rounded-md text-[10px] text-white font-black tracking-widest shadow-md">ŞEF</span>
                                </div>
                             ) : (
-                               <button onClick={() => switchRole('red', 'spymaster')} className="border-2 border-dashed border-fuchsia-500/30 hover:border-fuchsia-400 hover:bg-fuchsia-500/10 rounded-xl p-2 flex flex-col justify-center items-center h-14 transition-all">
-                                  <span className="text-fuchsia-400/70 font-black text-[10px] tracking-widest text-center leading-tight">İSTİHBARAT ŞEFİ<br/>OL</span>
+                               <button onClick={() => switchRole('red', 'spymaster')} className="border-2 border-dashed border-red-500/30 hover:border-red-400 hover:bg-red-500/10 rounded-xl p-2 flex flex-col justify-center items-center h-14 transition-all">
+                                  <span className="text-red-400/70 font-black text-[10px] tracking-widest text-center leading-tight">İSTİHBARAT ŞEFİ<br/>OL</span>
                                </button>
                             )}
                             {redTeam.filter((p:any)=>p.role==='operative').map((p:any) => (
@@ -1023,7 +1057,7 @@ export default function CodenamesGame() {
                              {localBlueName} İst. Şefi
                            </div>
                         </div>
-                        <div className={`flex justify-between items-center p-3 rounded-xl border ${hasRedSpymaster ? 'bg-fuchsia-500/10 border-fuchsia-500/20 text-fuchsia-300' : 'bg-black/20 border-white/5 text-white/40'}`}>
+                        <div className={`flex justify-between items-center p-3 rounded-xl border ${hasRedSpymaster ? 'bg-red-500/10 border-red-500/20 text-red-400' : 'bg-black/20 border-white/5 text-white/40'}`}>
                            <div className="flex items-center gap-3">
                              {hasRedSpymaster ? <CheckCircle2 size={18}/> : <div className="w-4 h-4 rounded-full border-2 border-white/20"/>}
                              {localRedName} İst. Şefi
@@ -1036,7 +1070,7 @@ export default function CodenamesGame() {
                            </div>
                            <span className="text-xs bg-black/30 px-2 py-1 rounded-md">{blueTeam.length}/2+</span>
                         </div>
-                        <div className={`flex justify-between items-center p-3 rounded-xl border ${ruleMin2Red ? 'bg-fuchsia-500/10 border-fuchsia-500/20 text-fuchsia-300' : 'bg-black/20 border-white/5 text-white/40'}`}>
+                        <div className={`flex justify-between items-center p-3 rounded-xl border ${ruleMin2Red ? 'bg-red-500/10 border-red-500/20 text-red-400' : 'bg-black/20 border-white/5 text-white/40'}`}>
                            <div className="flex items-center gap-3">
                              {ruleMin2Red ? <CheckCircle2 size={18}/> : <div className="w-4 h-4 rounded-full border-2 border-white/20"/>}
                              {localRedName} min 2 kişi
@@ -1090,28 +1124,28 @@ export default function CodenamesGame() {
                      {/* Kick Chat */}
                      <div>
                         <div className="flex justify-between items-center mb-4">
-                           <div className="flex items-center gap-3 text-white font-bold text-sm"><div className="p-1.5 bg-white/5 rounded-md border border-white/10"><MessageSquare size={16} className="text-fuchsia-400"/></div> Kick Chat</div>
+                           <div className="flex items-center gap-3 text-white font-bold text-sm"><div className="p-1.5 bg-white/5 rounded-md border border-white/10"><MessageSquare size={16} className="text-red-400"/></div> Kick Chat</div>
                            <button disabled={!mePlayer?.isHost} onClick={() => {
                                 const newState = !kickEnabled;
                                 setKickEnabled(newState);
                                 if (!newState && room.settings.introMode) broadcastSync({...room, settings: {...room.settings, introMode: false}});
-                             }} className={`w-12 h-6 rounded-full relative transition-colors border ${kickEnabled ? 'bg-fuchsia-500 border-fuchsia-400 shadow-[0_0_10px_rgba(217,70,239,0.4)]' : 'bg-black/50 border-white/10'}`}>
+                             }} className={`w-12 h-6 rounded-full relative transition-colors border ${kickEnabled ? 'bg-red-500 border-red-400 shadow-[0_0_10px_rgba(239,68,68,0.4)]' : 'bg-black/50 border-white/10'}`}>
                               <div className={`absolute top-[3px] w-4 h-4 bg-white rounded-full transition-all ${kickEnabled ? 'left-[26px]' : 'left-[3px]'}`}/>
                            </button>
                         </div>
                         <div className="flex gap-2 mb-3">
-                           <input value={kickChannelName} onChange={(e) => setKickChannelName(e.target.value)} disabled={kickConfirmed || !mePlayer?.isHost} className="flex-1 bg-black/40 border border-white/10 p-3 rounded-xl text-sm text-white outline-none focus:border-fuchsia-400 transition-colors" placeholder="Kanal adı" />
+                           <input value={kickChannelName} onChange={(e) => setKickChannelName(e.target.value)} disabled={kickConfirmed || !mePlayer?.isHost} className="flex-1 bg-black/40 border border-white/10 p-3 rounded-xl text-sm text-white outline-none focus:border-red-400 transition-colors" placeholder="Kanal adı" />
                            {mePlayer?.isHost && kickEnabled && (
                               !kickConfirmed ? 
-                                <button onClick={() => setKickConfirmed(true)} className="bg-white/10 hover:bg-fuchsia-500 p-3 rounded-xl text-white transition-colors"><CheckCircle2 size={18}/></button> :
-                                <button onClick={() => setKickConfirmed(false)} className="bg-fuchsia-500/20 text-fuchsia-400 p-3 rounded-xl transition-colors border border-fuchsia-500/30"><X size={18}/></button>
+                                <button onClick={() => setKickConfirmed(true)} className="bg-white/10 hover:bg-red-500 p-3 rounded-xl text-white transition-colors"><CheckCircle2 size={18}/></button> :
+                                <button onClick={() => setKickConfirmed(false)} className="bg-red-500/20 text-red-400 p-3 rounded-xl transition-colors border border-red-500/30"><X size={18}/></button>
                            )}
                         </div>
                         {kickConfirmed ? (
                            <div className="bg-cyan-500/10 border border-cyan-500/20 p-4 rounded-xl flex items-start gap-3">
                               <CheckCircle2 size={16} className="text-cyan-400 shrink-0 mt-0.5"/>
                               <div>
-                                 <p className="text-cyan-300 text-xs font-bold">Chat entegrasyonu aktif</p>
+                                 <p className="text-cyan-300 text-xs font-bold">Chat entegrasyon aktif</p>
                                  <p className="text-cyan-400/60 text-[10px] leading-relaxed mt-1">Tanışma aşamasında chatten '1' beğeni, '0' beğenmeme olarak sayılacak.</p>
                               </div>
                            </div>
@@ -1131,13 +1165,9 @@ export default function CodenamesGame() {
 
   // --- OYUN TAHTASI (BOARD - RESİMDEKİ TASARIM) ---
   if (view === 'playing' && room) {
-    const isMyTurn = room.currentTurn === mePlayer?.team;
-    const isSpymasterTurn = room.turnPhase === 'spymaster';
-    const isOperativeTurn = room.turnPhase === 'operative';
-    
-    const redLeft = room.cards.filter((c: any) => c.color === 'red' && !c.revealed).length;
-    const blueLeft = room.cards.filter((c: any) => c.color === 'blue' && !c.revealed).length;
     const isGameOver = room.status.includes('_won');
+    const redLeft = room.cards?.filter((c: any) => c.color === 'red' && !c.revealed).length || 0;
+    const blueLeft = room.cards?.filter((c: any) => c.color === 'blue' && !c.revealed).length || 0;
 
     return (
       <div className="min-h-screen bg-[#0A070E] flex flex-col text-slate-100 relative overflow-hidden font-sans">
@@ -1153,37 +1183,28 @@ export default function CodenamesGame() {
                 <span key={i} className="text-9xl font-black text-white px-8 py-4 tracking-tighter">MEKİPNAMES</span>
             ))}
         </div>
+
+        {/* SABİT TAKIM BİLGİSİ (SOL ALT) */}
+        {mePlayer && (
+            <div className={`fixed bottom-6 left-6 z-[200] px-5 py-3 rounded-2xl border shadow-2xl backdrop-blur-xl flex items-center gap-3 transition-all ${
+                mePlayer.team === 'red' ? 'bg-red-900/60 border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.3)] text-red-200' :
+                mePlayer.team === 'blue' ? 'bg-cyan-900/60 border-cyan-500/50 shadow-[0_0_20px_rgba(34,211,238,0.3)] text-cyan-200' :
+                'bg-zinc-900/60 border-zinc-500/50 text-zinc-300'
+            }`}>
+                {mePlayer.role === 'spymaster' ? <Settings size={24} className="animate-spin-slow"/> : <Search size={24}/>}
+                <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest opacity-70 leading-none mb-1">
+                        SİZİN TAKIMINIZ
+                    </p>
+                    <p className="text-lg font-black leading-none uppercase">
+                        {mePlayer.team === 'red' ? localRedName : mePlayer.team === 'blue' ? localBlueName : 'Siviller'}
+                    </p>
+                </div>
+            </div>
+        )}
         
-        {/* OYUN BİTİŞ EKRANI (OVERLAY) */}
-        <AnimatePresence>
-            {isGameOver && (
-                <motion.div 
-                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                    className="absolute inset-0 z-[200] bg-black/80 backdrop-blur-md flex flex-col items-center justify-center p-4"
-                >
-                    <motion.div 
-                        initial={{ scale: 0.8, y: 50 }} animate={{ scale: 1, y: 0 }}
-                        className={`max-w-2xl w-full rounded-3xl border-2 p-10 text-center shadow-2xl ${room.status === 'red_won' ? 'bg-[#1C0D11] border-fuchsia-500 shadow-[0_0_100px_rgba(217,70,239,0.2)]' : 'bg-[#0D161C] border-cyan-500 shadow-[0_0_100px_rgba(34,211,238,0.2)]'}`}
-                    >
-                        <Crown size={80} className={`mx-auto mb-6 ${room.status === 'red_won' ? 'text-fuchsia-400 drop-shadow-[0_0_15px_rgba(217,70,239,0.8)]' : 'text-cyan-400 drop-shadow-[0_0_15px_rgba(34,211,238,0.8)]'}`} />
-                        <h2 className="text-6xl font-black text-white tracking-tighter mb-4 uppercase">
-                            {room.status === 'red_won' ? localRedName : localBlueName} KAZANDI!
-                        </h2>
-                        <p className="text-xl text-white/60 mb-10 font-medium">Tüm ajanlar açığa çıkarıldı ve operasyon başarıyla tamamlandı.</p>
-                        
-                        {mePlayer?.isHost ? (
-                            <button onClick={returnToLobby} className={`px-10 py-5 rounded-2xl font-black text-lg text-black transition-all flex items-center justify-center gap-3 mx-auto w-full max-w-md ${room.status === 'red_won' ? 'bg-fuchsia-500 hover:bg-fuchsia-400 shadow-[0_0_20px_rgba(217,70,239,0.4)]' : 'bg-cyan-500 hover:bg-cyan-400 shadow-[0_0_20px_rgba(34,211,238,0.4)]'}`}>
-                                <RotateCcw size={24} /> LOBİYE GERİ DÖN
-                            </button>
-                        ) : (
-                            <div className="bg-white/5 border border-white/10 p-5 rounded-2xl text-white/50 font-bold uppercase tracking-widest text-sm">
-                                Kurucu (Host) lobiyi tekrar başlatması bekleniyor...
-                            </div>
-                        )}
-                    </motion.div>
-                </motion.div>
-            )}
-        </AnimatePresence>
+        {/* OYUN BİTİŞ EKRANI (INPUT YERİNE AŞAĞIDA) */}
+        {/* Not: Orijinal tam ekran overlay pop-up kaldırıldı, yerine Input'un olduğu yere taşındı */}
 
         {/* SIRA DEĞİŞTİ BANNER ANİMASYONU */}
         <AnimatePresence>
@@ -1193,14 +1214,14 @@ export default function CodenamesGame() {
                    animate={{ x: 0, opacity: 1 }}
                    exit={{ x: "100%", opacity: 0 }}
                    transition={{ type: "spring", stiffness: 100, damping: 15 }}
-                   className={`absolute top-1/2 left-0 right-0 -translate-y-1/2 z-[150] py-8 flex items-center justify-center border-y-4 shadow-2xl backdrop-blur-md ${showTurnBanner === 'red' ? 'bg-fuchsia-900/80 border-fuchsia-500' : 'bg-cyan-900/80 border-cyan-400'}`}
+                   className={`absolute top-1/2 left-0 right-0 -translate-y-1/2 z-[150] py-8 flex items-center justify-center border-y-4 shadow-2xl backdrop-blur-md ${showTurnBanner === 'red' ? 'bg-red-900/80 border-red-500' : 'bg-cyan-900/80 border-cyan-400'}`}
                >
                    <div className="flex items-center gap-6">
-                      <Swords size={60} className={showTurnBanner === 'red' ? 'text-fuchsia-300' : 'text-cyan-200'} />
+                      <Swords size={60} className={showTurnBanner === 'red' ? 'text-red-300' : 'text-cyan-200'} />
                       <h2 className="text-7xl font-black text-white uppercase tracking-tighter drop-shadow-xl">
                           {showTurnBanner === 'red' ? localRedName : localBlueName} SIRASI
                       </h2>
-                      <Swords size={60} className={showTurnBanner === 'red' ? 'text-fuchsia-300' : 'text-cyan-200'} />
+                      <Swords size={60} className={showTurnBanner === 'red' ? 'text-red-300' : 'text-cyan-200'} />
                    </div>
                </motion.div>
            )}
@@ -1210,7 +1231,7 @@ export default function CodenamesGame() {
         <AnimatePresence>
             {isDealingPhase && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
-                    {/* Kutu Alt (Bottom) - Hızlıca yaklaşır, bekler, aşağı inerek kaybolur */}
+                    {/* Kutu Alt (Bottom) */}
                     <motion.div
                         initial={{ y: "100vh", x: "-50%" }}
                         animate={{ y: ["100vh", "50vh", "50vh", "150vh"] }}
@@ -1222,13 +1243,9 @@ export default function CodenamesGame() {
                             backgroundRepeat: "no-repeat", 
                             backgroundPosition: "center" 
                         }}
-                    >
-                        {!isEnvMissing && (
-                            <span className="text-white/10 font-black tracking-widest uppercase text-xl">KUTU ALT .PNG</span>
-                        )}
-                    </motion.div>
+                    />
 
-                    {/* Kutu Üst (Lid) - Alt kutuyla birlikte gelir, hızlıca yukarı açılır */}
+                    {/* Kutu Üst (Lid) */}
                     <motion.div
                         initial={{ y: "100vh", x: "-50%" }}
                         animate={{ y: ["100vh", "50vh", "-100vh", "-100vh"] }}
@@ -1240,11 +1257,7 @@ export default function CodenamesGame() {
                             backgroundRepeat: "no-repeat", 
                             backgroundPosition: "center" 
                         }}
-                    >
-                        {!isEnvMissing && (
-                            <span className="text-white/10 font-black tracking-widest uppercase text-xl">KAPAK .PNG</span>
-                        )}
-                    </motion.div>
+                    />
                 </div>
             )}
         </AnimatePresence>
@@ -1254,12 +1267,12 @@ export default function CodenamesGame() {
           {showLeaveConfirm && (
             <div className="fixed inset-0 bg-black/80 z-[150] flex items-center justify-center p-4 backdrop-blur-md">
                <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-[#110D17] border-2 border-white/10 rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl">
-                  <AlertTriangle size={48} className="text-fuchsia-500 mx-auto mb-4" />
+                  <AlertTriangle size={48} className="text-red-500 mx-auto mb-4" />
                   <h3 className="text-2xl font-black text-white mb-2">Ayrılmak İstiyor Musunuz?</h3>
                   <p className="text-white/60 mb-8 font-medium">Oda bağlantınız kesilecek ve lobi listesine döneceksiniz.</p>
                   <div className="flex gap-4">
                      <button onClick={() => setShowLeaveConfirm(false)} className="flex-1 bg-white/10 hover:bg-white/20 text-white font-bold py-3 rounded-xl transition-colors">Hayır, Kal</button>
-                     <button onClick={leaveRoom} className="flex-1 bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-bold py-3 rounded-xl transition-colors">Evet, Ayrıl</button>
+                     <button onClick={leaveRoom} className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl transition-colors">Evet, Ayrıl</button>
                   </div>
                </motion.div>
             </div>
@@ -1287,29 +1300,29 @@ export default function CodenamesGame() {
               <span className="bg-black/40 text-white/50 border border-white/5 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2"><Users size={14}/> {room.players.length}</span>
               <div className="bg-black/40 border border-white/5 px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2">
                  <span className="text-white/50">Sırası:</span>
-                 <span className={room.currentTurn === 'red' ? 'text-fuchsia-400' : 'text-cyan-400'}>{room.currentTurn === 'red' ? (room.settings?.redName || 'KIRMIZI TAKIM') : (room.settings?.blueName || 'MAVİ TAKIM')}</span>
+                 <span className={room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-400'}>{room.currentTurn === 'red' ? (room.settings?.redName || 'KIRMIZI TAKIM') : (room.settings?.blueName || 'MAVİ TAKIM')}</span>
               </div>
            </div>
            
            <div className="flex gap-2">
               <span className="bg-black/40 text-white/80 border border-white/5 px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2"><Settings size={14} className="text-violet-400"/> {mePlayer?.name}</span>
-              <button onClick={() => setShowLeaveConfirm(true)} className="bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 hover:bg-fuchsia-500 hover:text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors"><LogOut size={14}/></button>
+              <button onClick={() => setShowLeaveConfirm(true)} className="bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors"><LogOut size={14}/></button>
            </div>
         </header>
 
         <div className="flex-1 flex gap-4 p-4 overflow-hidden z-10">
-           
+            
             {/* SOL PANEL (KIRMIZI TAKIM VE ZAMANLAYICI) */}
             <aside className="w-64 flex flex-col gap-4 shrink-0 overflow-y-auto hidden md:flex">
-                <div className="bg-gradient-to-b from-fuchsia-950/40 to-black/40 rounded-2xl p-4 flex flex-col items-center border border-fuchsia-500/20 shadow-lg relative overflow-hidden text-center min-h-[300px] backdrop-blur-md">
-                    <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-fuchsia-500/10 to-transparent pointer-events-none opacity-50"></div>
-                    <h2 className="text-lg font-black text-fuchsia-100 mb-2 relative z-10 uppercase tracking-wide drop-shadow-sm">{room.settings?.redName || 'KIRMIZI TAKIM'}</h2>
-                    <div className="text-7xl font-black text-fuchsia-400 mb-1 relative z-10 leading-none drop-shadow-[0_0_15px_rgba(217,70,239,0.5)]">{redLeft}</div>
-                    <div className="text-[10px] font-bold text-fuchsia-200/50 mb-6 relative z-10 uppercase tracking-[0.3em]">KALAN KART</div>
+                <div className="bg-gradient-to-b from-red-950/40 to-black/40 rounded-2xl p-4 flex flex-col items-center border border-red-500/20 shadow-lg relative overflow-hidden text-center min-h-[300px] backdrop-blur-md">
+                    <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-red-500/10 to-transparent pointer-events-none opacity-50"></div>
+                    <h2 className="text-lg font-black text-red-100 mb-2 relative z-10 uppercase tracking-wide drop-shadow-sm">{room.settings?.redName || 'KIRMIZI TAKIM'}</h2>
+                    <div className="text-7xl font-black text-red-400 mb-1 relative z-10 leading-none drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">{redLeft}</div>
+                    <div className="text-[10px] font-bold text-red-200/50 mb-6 relative z-10 uppercase tracking-[0.3em]">KALAN KART</div>
                     
                     <div className="space-y-2 w-full relative z-10">
                         {room.players.filter((p:any)=>p.team==='red'&&p.role==='spymaster').map((p:any)=> 
-                           <div key={p.sessionId} className="bg-fuchsia-500/20 border border-fuchsia-500/30 text-fuchsia-100 font-bold text-xs py-2 px-3 rounded-xl flex items-center justify-center gap-2"><ShieldAlert size={14} className="text-fuchsia-400"/> {p.name}</div>
+                           <div key={p.sessionId} className="bg-red-500/20 border border-red-500/30 text-red-100 font-bold text-xs py-2 px-3 rounded-xl flex items-center justify-center gap-2"><ShieldAlert size={14} className="text-red-400"/> {p.name}</div>
                         )}
                         <div className="grid grid-cols-2 gap-2 mt-2">
                            {room.players.filter((p:any)=>p.team==='red'&&p.role==='operative').map((p:any)=> 
@@ -1346,35 +1359,53 @@ export default function CodenamesGame() {
               <div className="grid grid-cols-5 gap-3 w-max shrink-0 relative mt-[-4vh]">
                 {room.cards.map((card: any, index: number) => {
                   const amISpymaster = mePlayer?.role === 'spymaster';
-                  const isRevealed = card.revealed || room.status.includes('_won');
-                  const showColor = isRevealed || amISpymaster;
+                  const isRevealed = card.revealed || isGameOver;
+                  
+                  // Şefin renkleri görebilmesi için (Şef için gösterilecek mi? Kapanan kartların opaklığını azalt)
+                  const isColorVisibleToSpymaster = amISpymaster;
+                  const showColor = isRevealed || isColorVisibleToSpymaster;
+                  const isPeeked = peekedCards.has(card.id);
+                  
+                  // RENK VE DOSYA İSMİ MANTIĞI
+                  const imgColor = card.color === 'neutral' ? 'white' : card.color === 'assassin' ? 'black' : card.color;
                   
                   // MEKIP HUB TEMASINA UYGUN KART STİLLERİ
                   const getCardStyle = () => {
-                    if (!showColor) return { outer: "bg-[#251f30] border border-white/10 shadow-[0_4px_0_rgba(255,255,255,0.05)]", pill: "bg-white/5 text-white/50 border border-white/5" };
-                    if (card.color === 'red') return { outer: "bg-gradient-to-br from-fuchsia-600 to-fuchsia-800 border border-fuchsia-400/50 shadow-[0_4px_0_rgba(217,70,239,0.4)]", pill: "bg-white/20 text-white font-bold", text: "text-white drop-shadow-sm" };
-                    if (card.color === 'blue') return { outer: "bg-gradient-to-br from-cyan-500 to-cyan-700 border border-cyan-300/50 shadow-[0_4px_0_rgba(34,211,238,0.4)]", pill: "bg-white/20 text-white font-bold", text: "text-white drop-shadow-sm" };
-                    if (card.color === 'neutral') return { outer: "bg-[#3a3347] border border-white/10 shadow-[0_4px_0_rgba(255,255,255,0.1)]", pill: "bg-white/10 text-white/70", text: "text-white/70" };
-                    return { outer: "bg-zinc-900 border border-zinc-700 shadow-[0_4px_0_rgba(0,0,0,0.8)]", pill: "bg-red-500/20 text-red-400 border border-red-500/30", text: "text-red-400" };
+                    // Eğer kart açılmışsa normal stil
+                    if (isRevealed) {
+                        if (card.color === 'red') return { outer: "bg-red-600", pill: "hidden", text: "hidden" };
+                        if (card.color === 'blue') return { outer: "bg-cyan-600", pill: "hidden", text: "hidden" };
+                        if (card.color === 'neutral') return { outer: "bg-white", pill: "hidden", text: "hidden" };
+                        return { outer: "bg-zinc-900", pill: "hidden", text: "hidden" };
+                    }
+
+                    // Henüz açılmamış ama ŞEF'in gördüğü renkler (Soluk olacak ki Mekipnames yazısı okunsun)
+                    if (isColorVisibleToSpymaster) {
+                        if (card.color === 'red') return { outer: "bg-red-900/40 border border-red-500/30", pill: "bg-black/60 border border-white/10", text: "text-red-300 drop-shadow-sm" };
+                        if (card.color === 'blue') return { outer: "bg-cyan-900/40 border border-cyan-500/30", pill: "bg-black/60 border border-white/10", text: "text-cyan-300 drop-shadow-sm" };
+                        if (card.color === 'neutral') return { outer: "bg-white/10 border border-white/20", pill: "bg-black/60 border border-white/10", text: "text-white/70" };
+                        return { outer: "bg-black/80 border border-zinc-700", pill: "bg-red-900/80 border border-red-500/50", text: "text-white" };
+                    }
+
+                    // Ajanlar İçin Normal Kapalı Kart
+                    return { outer: "bg-[#251f30] border border-white/10 shadow-[0_4px_0_rgba(255,255,255,0.05)]", pill: "bg-white/5 text-white/50 border border-white/5", text: "text-white/50" };
                   };
                   
                   const style = getCardStyle();
 
-                  // OY VEREN İSİMLERİ (MEVCUT TAKIM)
+                  // OY VEREN İSİMLERİ
                   const votingPlayers = card.votes
                       .map((vId: string) => room.players.find((p: any) => p.sessionId === vId))
                       .filter((p: any) => p && p.team === mePlayer?.team);
 
-                  // KUSURSUZ DESTE (DECK) MATEMATİĞİ - Tamamen Üst Üste!
+                  // KUSURSUZ DESTE (DECK) MATEMATİĞİ
                   const col = index % 5;
                   const row = Math.floor(index / 5);
                   
-                  // Yeni sabit boyutlara göre hesaplamalar
-                  const cardWidth = 177; // Sabitlendi
-                  const cardHeight = 107; // Sabitlendi
-                  const gap = 12; // 0.75rem (gap-3) yaklaşık 12px
+                  const cardWidth = 177; 
+                  const cardHeight = 107; 
+                  const gap = 12; 
                   
-                  // Merkez noktası hesaplama (px cinsinden, flex ile tutarlı)
                   const startX = (2 - col) * (cardWidth + gap);
                   const startY = (2 - row) * (cardHeight + gap) + 300; 
                   
@@ -1383,14 +1414,14 @@ export default function CodenamesGame() {
                   const deckRotation = (index * 7) % 8 - 4;
 
                   const initialProps = isDealingPhase 
-                      ? { opacity: 0, x: startX, y: "150vh", rotateZ: deckRotation }
+                      ? { opacity: 0, x: startX, y: inBoxY, rotateZ: deckRotation }
                       : { opacity: 1, x: 0, y: 0, rotateZ: 0 };
 
                   const animateProps = isDealingPhase
                       ? { 
                           opacity: [0, 0, 1, 1, 1, 1, 1], 
                           x: [startX, startX, startX, startX, startX, startX, 0], 
-                          y: ["150vh", inBoxY, inBoxY, inBoxY, midY, midY, 0], 
+                          y: [inBoxY, inBoxY, inBoxY, inBoxY, midY, midY, 0], 
                           rotateZ: [deckRotation, deckRotation, deckRotation, deckRotation, deckRotation, deckRotation, 0]
                         }
                       : { opacity: 1, x: 0, y: 0, rotateZ: 0 };
@@ -1408,7 +1439,18 @@ export default function CodenamesGame() {
                     <div key={card.id} className="relative z-10" style={{ width: '177px', height: '107px' }}>
                         <motion.div
                           onClick={() => {
-                            if (amISpymaster || isRevealed || !isMyTurn || !isOperativeTurn || room.status.includes('_won')) return;
+                            // GİZLİCE BAKMA (PEEKING) MANTIĞI: Eğer kart çoktan açılmışsa sadece resmin şeffaflığını değiştirip yazıyı göster
+                            if (card.revealed || isGameOver) {
+                                setPeekedCards(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(card.id)) next.delete(card.id);
+                                    else next.add(card.id);
+                                    return next;
+                                });
+                                return;
+                            }
+                            
+                            if (amISpymaster || !isMyTurn || !isOperativeTurn || isGameOver) return;
                             voteCard(card.id);
                           }}
                           initial={initialProps}
@@ -1416,44 +1458,45 @@ export default function CodenamesGame() {
                           transition={transitionProps}
                           whileHover={(!isRevealed && !amISpymaster && isMyTurn && isOperativeTurn) ? { y: -2, boxShadow: '0 8px 15px rgba(0,0,0,0.3)' } : {}}
                           whileTap={(!isRevealed && !amISpymaster && isMyTurn && isOperativeTurn) ? { y: 2, boxShadow: '0 0 0 transparent' } : {}}
-                          className={`absolute inset-0 rounded-xl flex items-end justify-center cursor-pointer select-none transition-all duration-200 overflow-hidden group p-2 pb-2.5 ${style.outer} ${isRevealed ? 'opacity-90' : ''}`}
+                          className={`absolute inset-0 rounded-xl flex items-center justify-center cursor-pointer select-none transition-all duration-200 overflow-hidden group p-2 ${style.outer} ${isRevealed ? 'shadow-none' : ''}`}
                         >
-                          {/* SİLİK WATERMARK (MEKIP) - Şefler İçin De Görünür */}
+                          {/* SİLİK WATERMARK (MEKIP) - Henüz Açılmamışken Görünür */}
                           {!isRevealed && (
-                             <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.04] z-0">
-                                <span className="font-black text-xl md:text-2xl lg:text-3xl tracking-[0.3em] text-white uppercase select-none">MEKIP</span>
+                             <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.02] z-0">
+                                <span className="font-black text-xl md:text-2xl lg:text-3xl tracking-[0.3em] text-white uppercase select-none drop-shadow-md">MEKIP</span>
                              </div>
                           )}
                           
-                          {/* AÇILDIĞINDA GELECEK RESİM VE ANİMASYONU */}
+                          {/* AÇILDIĞINDA GELECEK RESİM VE ANİMASYONU (.png Formatı ile) */}
                           {isRevealed && (
                              <motion.div 
                                initial={{ y: 0 }}
-                               whileHover={{ y: -30 }} 
-                               transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-                               className="absolute inset-0 bg-cover bg-center z-10"
-                               style={{ backgroundImage: `url(/cards/${card.color}/${(card.id % 3) + 1}.jpg)` }}
-                             >
-                                <div className="absolute inset-0 bg-black/20"></div> {/* Resmin üzerindeki kelimenin okunması için hafif karartma */}
-                             </motion.div>
+                               animate={{ y: isPeeked ? -40 : 0 }} 
+                               transition={{ type: 'spring', stiffness: 400, damping: 25 }}
+                               className={`absolute inset-0 bg-cover bg-center z-10 transition-opacity duration-300 ${isPeeked ? 'pointer-events-none border-b-2 border-dashed border-white/50' : 'opacity-100'}`}
+                               style={{ backgroundImage: `url(/cards/${imgColor}/${card.designId}.png)` }}
+                             />
                           )}
 
-                          {/* KELİME (PILL) KUTUSU */}
-                          <div className={`w-[95%] flex justify-center py-1.5 shadow-sm z-20 rounded-lg backdrop-blur-md ${style.pill}`}>
-                              <span className={`font-black text-sm tracking-widest uppercase ${style.text || ''}`}>{card.word}</span>
-                          </div>
+                          {/* KELİME (PILL) KUTUSU - Kart Açılmamışsa Görünür VEYA Peeking Yapılıyorsa Görünür */}
+                          {(!card.revealed || isPeeked) && (
+                              <div className={`w-[95%] absolute bottom-2 flex justify-center py-1.5 shadow-sm z-20 rounded-lg backdrop-blur-md transition-all duration-300 ${style.pill}`}>
+                                  <span className={`font-black text-sm tracking-widest uppercase ${style.text || ''}`}>{card.word}</span>
+                              </div>
+                          )}
 
                           {/* SOL ÜST KÖŞE: OY VEREN KİŞİLERİN İSİMLERİ */}
                           {!isRevealed && votingPlayers.length > 0 && (
                             <div className="absolute top-1.5 left-1.5 flex flex-col gap-1 z-30 pointer-events-none">
                               {votingPlayers.map((p: any) => (
-                                <div key={p.sessionId} className={`px-2 py-0.5 rounded-md shadow-lg text-[9px] font-black border tracking-wider backdrop-blur-sm ${p.team === 'red' ? 'bg-fuchsia-600/90 border-fuchsia-400/50 text-white' : 'bg-cyan-600/90 border-cyan-400/50 text-white'}`}>
+                                <div key={p.sessionId} className={`px-2 py-0.5 rounded-md shadow-lg text-[9px] font-black border tracking-wider backdrop-blur-sm ${p.team === 'red' ? 'bg-red-600/90 border-red-400/50 text-white' : 'bg-cyan-600/90 border-cyan-400/50 text-white'}`}>
                                   {p.name}
                                 </div>
                               ))}
                             </div>
                           )}
 
+                          {/* ŞEFLER İÇİN SİYAH KART UYARISI */}
                           {amISpymaster && !isRevealed && card.color === 'assassin' && (
                             <div className="absolute top-2 left-2 opacity-80 z-30 bg-black/50 p-1.5 rounded-lg border border-red-500/30 backdrop-blur-md"><Search size={16} className="text-red-400 drop-shadow-sm"/></div>
                           )}
@@ -1463,7 +1506,7 @@ export default function CodenamesGame() {
                         {!isRevealed && !amISpymaster && isMyTurn && isOperativeTurn && card.votes.includes(sessionId) && (
                             <button 
                               onClick={(e) => { e.stopPropagation(); revealCard(card.id); }} 
-                              className="absolute -top-3 -right-3 bg-gradient-to-br from-cyan-400 to-blue-500 hover:from-cyan-300 hover:to-blue-400 text-white p-2.5 rounded-xl shadow-[0_4px_0_#1e40af,0_10px_15px_-3px_rgba(34,211,238,0.5)] hover:shadow-[0_6px_0_#1e40af,0_10px_20px_-3px_rgba(34,211,238,0.6)] hover:-translate-y-1 transition-all active:translate-y-1 active:shadow-[0_0_0_#1e40af] border border-cyan-200/50 flex items-center justify-center z-[100] cursor-pointer"
+                              className={`absolute -top-3 -right-3 text-white p-2.5 rounded-xl transition-all active:translate-y-1 active:shadow-[0_0_0_transparent] flex items-center justify-center z-[100] cursor-pointer border ${room.currentTurn === 'red' ? 'bg-gradient-to-br from-red-400 to-red-600 hover:from-red-300 hover:to-red-500 shadow-[0_4px_0_#991b1b,0_10px_15px_-3px_rgba(239,68,68,0.5)] border-red-200/50 hover:shadow-[0_6px_0_#991b1b,0_10px_20px_-3px_rgba(239,68,68,0.6)]' : 'bg-gradient-to-br from-cyan-400 to-blue-500 hover:from-cyan-300 hover:to-blue-400 shadow-[0_4px_0_#1e40af,0_10px_15px_-3px_rgba(34,211,238,0.5)] border-cyan-200/50 hover:shadow-[0_6px_0_#1e40af,0_10px_20px_-3px_rgba(34,211,238,0.6)]'}`}
                               title="Kartı Aç"
                             >
                               <Hand size={20} className="drop-shadow-md" />
@@ -1474,9 +1517,26 @@ export default function CodenamesGame() {
                 })}
               </div>
 
-              {/* INPUT ALANI (TAM GRID GENİŞLİĞİNDE) */}
+              {/* INPUT ALANI (TAM GRID GENİŞLİĞİNDE) VE OYUN BİTİŞ YÖNETİMİ */}
               <div className="w-full max-w-[900px] mt-8 flex gap-3 shrink-0 relative z-10">
-                 {mePlayer?.role === 'spymaster' && isMyTurn && isSpymasterTurn && !room.status.includes('_won') ? (
+                 {isGameOver ? (
+                     <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-6 py-4 flex items-center justify-between shadow-lg">
+                        <div className="flex items-center gap-4">
+                           <Crown size={32} className={room.status === 'red_won' ? 'text-red-400' : 'text-cyan-400'} />
+                           <div>
+                               <h2 className="text-xl font-black uppercase text-white tracking-widest">{room.status === 'red_won' ? localRedName : localBlueName} KAZANDI</h2>
+                               <p className="text-white/40 text-xs font-bold uppercase mt-1">OPERASYON TAMAMLANDI</p>
+                           </div>
+                        </div>
+                        {mePlayer?.isHost ? (
+                            <button onClick={returnToLobby} className="bg-cyan-500 hover:bg-cyan-400 text-black px-6 py-3 rounded-xl font-black transition-all shadow-[0_0_15px_rgba(34,211,238,0.4)] flex items-center gap-2 active:scale-95">
+                                <RotateCcw size={18} /> LOBİYE ÇEK
+                            </button>
+                        ) : (
+                            <p className="text-white/30 text-sm font-bold animate-pulse">Kurucunun lobiyi kurması bekleniyor...</p>
+                        )}
+                     </div>
+                 ) : mePlayer?.role === 'spymaster' && isMyTurn && isSpymasterTurn && !room.status.includes('_won') ? (
                     <>
                        <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl p-1.5 flex shadow-lg transition-all focus-within:border-cyan-400/50 focus-within:bg-white/[0.06]">
                           <div className="pl-4 pr-2 flex items-center text-white/30"><Pencil size={18}/></div>
@@ -1497,11 +1557,21 @@ export default function CodenamesGame() {
                           />
                           <button onClick={() => setClueCount(prev => typeof prev === 'number' ? Math.min(9, prev + 1) : 1)} className="w-10 h-10 rounded-xl flex items-center justify-center hover:bg-white/10 text-white font-black transition-colors">+</button>
                        </div>
-                       <button onClick={submitClue} disabled={!clueWord} className="bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 disabled:from-white/5 disabled:to-white/5 disabled:text-white/20 text-white px-8 rounded-2xl font-black text-sm tracking-widest transition-all shadow-[0_0_20px_rgba(34,211,238,0.3)] disabled:shadow-none shrink-0 border border-white/10 disabled:border-transparent">GÖNDER</button>
+                       <button onClick={submitClue} disabled={!clueWord} className={`text-white px-8 rounded-2xl font-black text-sm tracking-widest transition-all shrink-0 border border-white/10 disabled:border-transparent disabled:from-white/5 disabled:to-white/5 disabled:text-white/20 disabled:shadow-none bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-500 to-red-700 hover:from-red-400 hover:to-red-600 shadow-[0_0_20px_rgba(239,68,68,0.3)]' : 'from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 shadow-[0_0_20px_rgba(34,211,238,0.3)]'}`}>GÖNDER</button>
                     </>
+                 ) : mePlayer?.role === 'operative' && isMyTurn && isOperativeTurn && !room.status.includes('_won') ? (
+                     // AJANLAR İÇİN TURU GEÇ (PASS) BUTONU
+                     <div className="flex w-full gap-3">
+                         <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-6 py-4 flex items-center justify-center text-white/50 text-sm font-bold shadow-lg">
+                             <Search size={18} className="mr-2 text-white/30" /> Takım arkadaşlarınızla istihbaratı tartışıp hedefleri seçin.
+                         </div>
+                         <button onClick={skipTurn} className={`flex items-center gap-2 text-white px-8 rounded-2xl font-black text-sm tracking-widest transition-all shrink-0 border border-white/10 shadow-lg bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-900 to-black hover:from-red-800 border-red-500/30' : 'from-cyan-900 to-black hover:from-cyan-800 border-cyan-500/30'}`}>
+                             <FastForward size={18} /> PAS GEÇ
+                         </button>
+                     </div>
                  ) : (
                     <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-6 py-4 flex items-center justify-center text-white/50 text-sm font-bold shadow-lg">
-                       {room.status.includes('_won') ? 'Operasyon tamamlandı.' : 'Karşı merkezin hamlesini bekleyin veya takım arkadaşlarınızla istihbaratı tartışın...'}
+                        Karşı merkezin hamlesini bekleyin veya takım arkadaşlarınızla istihbaratı tartışın...
                     </div>
                  )}
               </div>
@@ -1534,30 +1604,45 @@ export default function CodenamesGame() {
                    </div>
                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
                       {room.currentClue && (
-                         <div className="mb-5 bg-gradient-to-r from-violet-500/20 to-cyan-500/20 border border-white/10 p-3 rounded-xl text-xs font-medium text-white/80 shadow-md">
+                         <div className={`mb-5 border p-3 rounded-xl text-xs font-medium text-white/80 shadow-md ${room.currentTurn === 'red' ? 'bg-gradient-to-r from-red-500/20 to-black/20 border-red-500/30' : 'bg-gradient-to-r from-cyan-500/20 to-black/20 border-cyan-500/30'}`}>
                             <div className="flex items-center gap-2 mb-1.5 opacity-70"><Info size={12}/> Aktif İpucu:</div>
-                            <strong className="text-cyan-300 uppercase tracking-wider text-sm block">{room.currentClue.word} <span className="opacity-50">x</span>{room.currentClue.count}</strong>
+                            <strong className={`uppercase tracking-wider text-sm block ${room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-300'}`}>{room.currentClue.word} <span className="opacity-50">x</span>{room.currentClue.count}</strong>
                          </div>
                       )}
                       <div className="space-y-4">
-                        {room.gameLogs?.slice().reverse().map((log: any, idx: number) => (
-                           <div key={log.id} className="text-[11px] leading-relaxed relative pl-3 before:absolute before:left-0 before:top-1.5 before:w-1 before:h-1 before:rounded-full before:bg-white/20">
-                              <span className={log.team === 'red' ? 'text-fuchsia-400 font-bold' : 'text-cyan-400 font-bold'}>{log.team === 'red' ? 'KRMZ' : 'MAVİ'}</span>{' '}
-                              <span className="text-white/40 truncate max-w-[60px] inline-block align-bottom">{log.playerName}</span>{' '}
-                              {log.type === 'clue' ? (
-                                 <span className="text-white/60">ipucu: <strong className="text-white uppercase tracking-wider">{log.word} <span className="opacity-50 text-[10px]">x</span>{log.count}</strong></span>
-                              ) : log.type === 'timeout' ? (
-                                 <span className="text-amber-400 font-bold ml-1">SÜRESİ BİTTİ</span>
-                              ) : (
-                                 <>
-                                    <span className="text-white/50">açtı: {log.word}</span>{' '}
-                                    <span className={`font-bold ml-1 px-1.5 py-0.5 rounded text-[9px] ${log.color === log.team ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
-                                       {log.color === log.team ? 'DOĞRU' : 'YANLIŞ'}
-                                    </span>
-                                 </>
-                              )}
-                           </div>
-                        ))}
+                        {room.gameLogs?.slice().reverse().map((log: any, idx: number) => {
+                           // Kelimenin Log Rengini Belirleme
+                           let wordColorClass = "text-white/80";
+                           if (log.type === 'reveal' && log.color) {
+                               if (log.color === 'red') wordColorClass = "text-red-400";
+                               else if (log.color === 'blue') wordColorClass = "text-cyan-400";
+                               else if (log.color === 'assassin') wordColorClass = "text-zinc-400 bg-black px-1 rounded";
+                               else wordColorClass = "text-white/60";
+                           }
+
+                           return (
+                               <div key={log.id} className="text-[11px] leading-relaxed relative pl-3 before:absolute before:left-0 before:top-1.5 before:w-1 before:h-1 before:rounded-full before:bg-white/20">
+                                  <span className={log.team === 'red' ? 'text-red-400 font-bold' : 'text-cyan-400 font-bold'}>{log.team === 'red' ? 'KRMZ' : 'MAVİ'}</span>{' '}
+                                  <span className="text-white/40 truncate max-w-[50px] inline-block align-bottom">{log.playerName}</span>{' '}
+                                  
+                                  {log.type === 'clue' ? (
+                                     <span className="text-white/60 text-[10px]">ipucu verdi: <strong className={`uppercase tracking-wider text-[11px] ${log.team === 'red' ? 'text-red-400' : 'text-cyan-400'}`}>{log.word} <span className="opacity-50 text-[10px]">x</span>{log.count}</strong></span>
+                                  ) : log.type === 'timeout' ? (
+                                     <span className="text-amber-400 font-bold ml-1">SÜRESİ BİTTİ</span>
+                                  ) : log.type === 'pass' ? (
+                                     <span className="font-bold ml-1 text-white/50 bg-white/10 px-1.5 py-0.5 rounded">PAS GEÇİLDİ</span>
+                                  ) : (
+                                     <div className="mt-1 bg-black/20 p-1.5 rounded-lg border border-white/5">
+                                        {log.relatedClue && <div className="text-[9px] text-white/30 uppercase mb-0.5 leading-none">'{log.relatedClue}' için açıldı:</div>}
+                                        <span className={`uppercase font-black tracking-wider ${wordColorClass}`}>{log.word}</span>
+                                        <span className={`font-bold ml-2 px-1.5 py-0.5 rounded text-[9px] float-right ${log.color === log.team ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/20' : log.color === 'assassin' ? 'bg-red-900/50 text-red-500 border border-red-500/50' : 'bg-amber-500/20 text-amber-400 border border-amber-500/20'}`}>
+                                           {log.color === log.team ? 'DOĞRU' : log.color === 'assassin' ? 'SUİKASTÇİ' : 'YANLIŞ'}
+                                        </span>
+                                     </div>
+                                  )}
+                               </div>
+                           );
+                        })}
                       </div>
                       {(!room.gameLogs || room.gameLogs.length === 0) && <div className="text-white/30 italic text-xs font-medium text-center mt-10">Henüz hamle yapılmadı.</div>}
                    </div>
