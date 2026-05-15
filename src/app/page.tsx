@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle2, Hand, Search, Users, ShieldAlert, Crown, Copy, Settings, ArrowRight, AlertTriangle, ThumbsUp, ThumbsDown, X, Play, LogIn, Lock, Unlock, UserPlus, Info, ScrollText, LogOut, Clock, MessageSquare, Eye, EyeOff, Pencil, Sparkles, RotateCcw } from 'lucide-react';
+import { CheckCircle2, Hand, Search, Users, ShieldAlert, Crown, Copy, Settings, ArrowRight, AlertTriangle, ThumbsUp, ThumbsDown, X, Play, LogIn, Lock, Unlock, UserPlus, Info, ScrollText, LogOut, Clock, MessageSquare, Eye, EyeOff, Pencil, Sparkles, RotateCcw, Swords } from 'lucide-react';
 import { Player, Room, Card, Team, Role } from '@/types';
 import bcrypt from 'bcryptjs';
 
@@ -26,11 +26,15 @@ export default function CodenamesGame() {
   // VİDEODAKİ KUTU AÇILMA ANİMASYONU İÇİN DURUMLAR
   const [isDealingPhase, setIsDealingPhase] = useState(false);
   const hasDealtRef = useRef(false);
+  
+  // SIRA DEĞİŞTİ ANİMASYONU İÇİN
+  const [showTurnBanner, setShowTurnBanner] = useState<Team | null>(null);
+  const prevTurnRef = useRef<Team | null>(null);
 
   const roomRef = useRef<any>(null);
   useEffect(() => { roomRef.current = room; }, [room]);
 
-  // ORTAK DEĞİŞKEN
+  // ORTAK DEĞİŞKEN 
   const mePlayer = room?.players?.find((p: any) => p.sessionId === sessionId);
 
   // ODA OLUŞTURMA
@@ -67,6 +71,9 @@ export default function CodenamesGame() {
   const [turnTimer, setTurnTimer] = useState(60);
   const [showRoomCode, setShowRoomCode] = useState(false);
 
+  // SES EFEKTİ REFERANSI
+  const tickAudioRef = useRef<HTMLAudioElement | null>(null);
+
   const isEnvMissing = !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   // 1. OTURUM VE URL KONTROLÜ
@@ -94,6 +101,11 @@ export default function CodenamesGame() {
     }
     
     if (joinId) window.history.replaceState(null, '', window.location.pathname);
+
+    // Audio Nesnesini Oluştur
+    if (typeof window !== 'undefined') {
+        tickAudioRef.current = new Audio('/tick.mp3');
+    }
   }, []);
 
   useEffect(() => {
@@ -109,20 +121,43 @@ export default function CodenamesGame() {
   useEffect(() => {
     if (room?.settings?.redName) setLocalRedName(room.settings.redName);
     if (room?.settings?.blueName) setLocalBlueName(room.settings.blueName);
-  }, [room?.settings?.redName, room?.settings?.blueName]);
+    
+    // SIRA DEĞİŞTİ ANİMASYONU KONTROLÜ
+    if (room?.currentTurn && prevTurnRef.current !== null && prevTurnRef.current !== room.currentTurn && !room.status.includes('_won') && view === 'playing') {
+        setShowTurnBanner(room.currentTurn);
+        setTimeout(() => setShowTurnBanner(null), 3000); // 3 saniye sonra banner'ı gizle
+    }
+    prevTurnRef.current = room?.currentTurn || null;
+
+  }, [room?.settings?.redName, room?.settings?.blueName, room?.currentTurn, view]);
 
   // Oyun içi zamanlayıcı ve Süre Bittiğinde Sıra Değişimi
   useEffect(() => {
      if (view === 'playing' && room && !room.status.includes('_won')) {
         const timeLimit = room.turnPhase === 'spymaster' ? room.settings.spymasterTime : room.settings.operativeTime;
         setTurnTimer(timeLimit);
+        
+        // Sıra / Faz değiştiğinde çalan sesi durdur (eğer çalıyorsa)
+        if (tickAudioRef.current) {
+            tickAudioRef.current.pause();
+            tickAudioRef.current.currentTime = 0;
+        }
      }
   }, [room?.currentTurn, room?.turnPhase, view]);
 
   useEffect(() => {
      if (view === 'playing' && turnTimer > 0 && room && !room.status.includes('_won')) {
+         
+         // SON 10 SANİYE SES ÇALMA KONTROLÜ
+         if (turnTimer === 10 && mePlayer?.team === room.currentTurn) {
+             if (tickAudioRef.current) {
+                 tickAudioRef.current.play().catch(e => console.log("Ses oynatılamadı:", e));
+             }
+         }
+
          const t = setTimeout(() => setTurnTimer(turnTimer - 1), 1000);
          return () => clearTimeout(t);
+
      } else if (view === 'playing' && turnTimer === 0 && room && !room.status.includes('_won') && mePlayer?.isHost) {
          // Süre bittiğinde sırayı karşıya geçir (Sadece Host Tetikler)
          let updatedRoom = { ...room };
@@ -560,6 +595,13 @@ export default function CodenamesGame() {
           <div className="neon-stars neon-stars-2"></div>
           <div className="neon-stars neon-stars-3"></div>
         </div>
+
+        {/* ARKA PLAN MEKİPNAMES YAZISI (PATTERN) */}
+        <div className="absolute inset-0 pointer-events-none opacity-[0.03] flex flex-wrap content-start -rotate-12 scale-150 z-0 select-none overflow-hidden">
+            {Array.from({ length: 200 }).map((_, i) => (
+                <span key={i} className="text-9xl font-black text-white px-8 py-4 tracking-tighter">MEKİPNAMES</span>
+            ))}
+        </div>
         
         <motion.form initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} onSubmit={handleLogin} className="w-full max-w-md bg-white/[0.06] border border-white/10 p-8 rounded-3xl shadow-2xl backdrop-blur-xl relative z-10">
           {isEnvMissing && (
@@ -588,10 +630,17 @@ export default function CodenamesGame() {
     return (
       <div className="min-h-screen bg-[#0A070E] p-6 md:p-12 flex gap-8 flex-col md:flex-row relative overflow-hidden text-white">
         {/* MekipHub Neon Background */}
-        <div className="neon-bg absolute inset-0 pointer-events-none">
+        <div className="neon-bg absolute inset-0 pointer-events-none z-0">
           <div className="neon-stars neon-stars-1"></div>
           <div className="neon-stars neon-stars-2"></div>
           <div className="neon-stars neon-stars-3"></div>
+        </div>
+
+        {/* ARKA PLAN MEKİPNAMES YAZISI (PATTERN) */}
+        <div className="absolute inset-0 pointer-events-none opacity-[0.03] flex flex-wrap content-start -rotate-12 scale-150 z-0 select-none overflow-hidden">
+            {Array.from({ length: 200 }).map((_, i) => (
+                <span key={i} className="text-9xl font-black text-white px-8 py-4 tracking-tighter">MEKİPNAMES</span>
+            ))}
         </div>
 
         <div className="w-full md:w-1/3 relative z-10">
@@ -674,7 +723,7 @@ export default function CodenamesGame() {
         </div>
         <div className="absolute inset-0 pointer-events-none opacity-[0.03] flex flex-wrap content-start -rotate-12 scale-150 z-0 select-none overflow-hidden">
             {Array.from({ length: 200 }).map((_, i) => (
-                <span key={i} className="text-9xl font-black text-white px-8 py-4 tracking-tighter">MEKIP</span>
+                <span key={i} className="text-9xl font-black text-white px-8 py-4 tracking-tighter">MEKİPNAMES</span>
             ))}
         </div>
 
@@ -1097,6 +1146,13 @@ export default function CodenamesGame() {
           <div className="neon-stars neon-stars-1"></div>
           <div className="neon-stars neon-stars-2"></div>
         </div>
+
+        {/* ARKA PLAN MEKİPNAMES YAZISI (PATTERN) */}
+        <div className="absolute inset-0 pointer-events-none opacity-[0.03] flex flex-wrap content-start -rotate-12 scale-150 z-0 select-none overflow-hidden">
+            {Array.from({ length: 200 }).map((_, i) => (
+                <span key={i} className="text-9xl font-black text-white px-8 py-4 tracking-tighter">MEKİPNAMES</span>
+            ))}
+        </div>
         
         {/* OYUN BİTİŞ EKRANI (OVERLAY) */}
         <AnimatePresence>
@@ -1127,6 +1183,27 @@ export default function CodenamesGame() {
                     </motion.div>
                 </motion.div>
             )}
+        </AnimatePresence>
+
+        {/* SIRA DEĞİŞTİ BANNER ANİMASYONU */}
+        <AnimatePresence>
+           {showTurnBanner && (
+               <motion.div
+                   initial={{ x: "-100%", opacity: 0 }}
+                   animate={{ x: 0, opacity: 1 }}
+                   exit={{ x: "100%", opacity: 0 }}
+                   transition={{ type: "spring", stiffness: 100, damping: 15 }}
+                   className={`absolute top-1/2 left-0 right-0 -translate-y-1/2 z-[150] py-8 flex items-center justify-center border-y-4 shadow-2xl backdrop-blur-md ${showTurnBanner === 'red' ? 'bg-fuchsia-900/80 border-fuchsia-500' : 'bg-cyan-900/80 border-cyan-400'}`}
+               >
+                   <div className="flex items-center gap-6">
+                      <Swords size={60} className={showTurnBanner === 'red' ? 'text-fuchsia-300' : 'text-cyan-200'} />
+                      <h2 className="text-7xl font-black text-white uppercase tracking-tighter drop-shadow-xl">
+                          {showTurnBanner === 'red' ? localRedName : localBlueName} SIRASI
+                      </h2>
+                      <Swords size={60} className={showTurnBanner === 'red' ? 'text-fuchsia-300' : 'text-cyan-200'} />
+                   </div>
+               </motion.div>
+           )}
         </AnimatePresence>
 
         {/* VİDEODAKİ EFSANEVİ 3D KUTU AÇILIŞ ANİMASYONU */}
