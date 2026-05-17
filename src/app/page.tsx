@@ -1,17 +1,22 @@
 "use client";
 
 import { useEffect, useState, useRef } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle2, Hand, Search, Users, ShieldAlert, Crown, Copy, Settings, ArrowRight, AlertTriangle, ThumbsUp, ThumbsDown, X, Play, LogIn, Lock, Unlock, UserPlus, Info, ScrollText, LogOut, Clock, MessageSquare, Eye, EyeOff, Pencil, Sparkles, RotateCcw, Swords, FastForward } from 'lucide-react';
 import { Player, Room, Card, Team, Role } from '@/types';
 import bcrypt from 'bcryptjs';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://lutfen-env-dosyasi-olustur.supabase.co';
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'lutfen-key-ekle';
-const supabase = createClient(supabaseUrl, supabaseKey);
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
 
 const FALLBACK_WORDS = ["ELMA", "AJAN", "KÖPEK", "UZAY", "MISIR", "ALTIN", "HÜCRE", "ZAMAN", "KILIÇ", "BOMBA", "MASA", "KEDİ", "KUŞ", "DENİZ", "OKUL", "OYUN", "TELEFON", "KALP", "RÜZGAR", "ATEŞ", "BİLGİSAYAR", "GÖZLÜK", "DUVAR", "KAPI", "PENCERE"];
+
+// BACKEND NE GÖNDERİRSE GÖNDERSİN BUNLAR HER ZAMAN "ÖZEL KELİME" SAYILACAK KALKAN LİSTE
+const KNOWN_SPECIALS = [
+    'İSTANBUL', 'TÜRKİYE', 'LONDRA', 'İNGİLTERE', 'PARİS', 'FRANSA', 'TOKYO', 'JAPONYA', 
+    'BERLİN', 'ALMANYA', 'ROMA', 'İITALYA', 'MADRİD', 'İSPANYA', 'MOSKOVA', 'AMERİKA', 
+    'PEKİN', 'ÇİN', 'BAKÜ', 'AZERBAYCAN'
+];
 
 export default function CodenamesGame() {
   // GÖRÜNÜM YÖNETİMİ
@@ -20,7 +25,7 @@ export default function CodenamesGame() {
   const [sessionId, setSessionId] = useState('');
   const [rooms, setRooms] = useState<any[]>([]);
   const [room, setRoom] = useState<any | null>(null);
-  const [channel, setChannel] = useState<any>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
   const [hostPresent, setHostPresent] = useState(true);
 
   // VİDEODAKİ KUTU AÇILMA ANİMASYONU İÇİN DURUMLAR
@@ -34,10 +39,15 @@ export default function CodenamesGame() {
   // YAZIYA GİZLİCE BAKMA (PEEKING) İÇİN LOKAL STATE
   const [peekedCards, setPeekedCards] = useState<Set<number>>(new Set());
 
+  // ÖZEL KELİME EKLEME DURUMLARI (MODAL VE LOBİ YÖNETİMİ)
+  const [showWordModal, setShowWordModal] = useState(false);
+  const [customWordsInput, setCustomWordsInput] = useState('');
+  const [customWordProb, setCustomWordProb] = useState<number>(0);
+
   const roomRef = useRef<any>(null);
   useEffect(() => { roomRef.current = room; }, [room]);
 
-  // ORTAK DEĞİŞKENLER (Hata çözümü için tüm fonksiyonların erişebileceği en üste taşındı)
+  // ORTAK DEĞİŞKENLER
   const mePlayer = room?.players?.find((p: any) => p.sessionId === sessionId);
   const isMyTurn = room?.currentTurn === mePlayer?.team;
   const isSpymasterTurn = room?.turnPhase === 'spymaster';
@@ -81,7 +91,12 @@ export default function CodenamesGame() {
   // SES EFEKTİ REFERANSI
   const tickAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const isEnvMissing = !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  // SOCKET.IO BAĞLANTISI BAŞLATMA
+  useEffect(() => {
+    const newSocket = io(BACKEND_URL);
+    setSocket(newSocket);
+    return () => { newSocket.disconnect(); };
+  }, []);
 
   // 1. OTURUM VE URL KONTROLÜ
   useEffect(() => {
@@ -109,7 +124,6 @@ export default function CodenamesGame() {
     
     if (joinId) window.history.replaceState(null, '', window.location.pathname);
 
-    // Audio Nesnesini Oluştur
     if (typeof window !== 'undefined') {
         tickAudioRef.current = new Audio('/tick.mp3');
     }
@@ -120,9 +134,15 @@ export default function CodenamesGame() {
   }, [view]);
 
   const fetchRooms = async () => {
-    if (isEnvMissing) return;
-    const { data } = await supabase.from('active_codenames_rooms').select('*');
-    if (data) setRooms(data);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/rooms`);
+      if (res.ok) {
+        const data = await res.json();
+        setRooms(data);
+      }
+    } catch (e) {
+      console.error("Odalar çekilemedi:", e);
+    }
   };
 
   useEffect(() => {
@@ -132,7 +152,7 @@ export default function CodenamesGame() {
     // SIRA DEĞİŞTİ ANİMASYONU KONTROLÜ
     if (room?.currentTurn && prevTurnRef.current !== null && prevTurnRef.current !== room.currentTurn && !room.status.includes('_won') && view === 'playing') {
         setShowTurnBanner(room.currentTurn);
-        setTimeout(() => setShowTurnBanner(null), 3000); // 3 saniye sonra banner'ı gizle
+        setTimeout(() => setShowTurnBanner(null), 3000);
     }
     prevTurnRef.current = room?.currentTurn || null;
 
@@ -144,7 +164,6 @@ export default function CodenamesGame() {
         const timeLimit = room.turnPhase === 'spymaster' ? room.settings.spymasterTime : room.settings.operativeTime;
         setTurnTimer(timeLimit);
         
-        // Sıra / Faz değiştiğinde çalan sesi durdur (eğer çalıyorsa)
         if (tickAudioRef.current) {
             tickAudioRef.current.pause();
             tickAudioRef.current.currentTime = 0;
@@ -152,33 +171,63 @@ export default function CodenamesGame() {
      }
   }, [room?.currentTurn, room?.turnPhase, view]);
 
+  // BACKEND ZAMANLAYICI DİNLEYİCİSİ
   useEffect(() => {
-     if (view === 'playing' && turnTimer > 0 && room && !room.status.includes('_won')) {
-         
-         // SON 10 SANİYE SES ÇALMA KONTROLÜ
-         if (turnTimer === 10 && mePlayer?.team === room.currentTurn) {
+    if (!socket) return;
+    const handleTimerUpdate = (timeLeft: number) => {
+        setTurnTimer(timeLeft);
+    };
+    socket.on('timerUpdate', handleTimerUpdate);
+    return () => {
+        socket.off('timerUpdate', handleTimerUpdate);
+    };
+  }, [socket]);
+
+  // HOST TARAFINDAN BACKEND ZAMANLAYICISINI TETİKLEME
+  useEffect(() => {
+     if (view === 'playing' && room && !room.status.includes('_won') && mePlayer?.isHost) {
+        // Animasyon sürerken sayacı durdur
+        if (isDealingPhase) {
+            socket?.emit('stopTimer', room.id);
+            return;
+        }
+        // Animasyon bittiğinde veya sıra değiştiğinde sayacı başlat
+        const timeLimit = room.turnPhase === 'spymaster' ? room.settings.spymasterTime : room.settings.operativeTime;
+        socket?.emit('startTimer', { roomId: room.id, duration: timeLimit });
+     }
+  }, [room?.currentTurn, room?.turnPhase, room?.status, isDealingPhase, mePlayer?.isHost, view]);
+
+  // SÜRE BİTİMİ VE SES EFEKTİ KONTROLÜ
+  useEffect(() => {
+     if (view === 'playing') {
+         // Son 10 saniye uyarı sesi (Sadece 1 Kere Oynaması için baştan sarılır)
+         if (turnTimer === 10 && mePlayer?.team === room?.currentTurn) {
              if (tickAudioRef.current) {
+                 tickAudioRef.current.currentTime = 0;
                  tickAudioRef.current.play().catch(e => console.log("Ses oynatılamadı:", e));
              }
+         } 
+         // Süre yeniden 10'dan büyükse veya 0'sa sesi durdur
+         else if ((turnTimer > 10 || turnTimer === 0) && tickAudioRef.current) {
+             tickAudioRef.current.pause();
+             tickAudioRef.current.currentTime = 0;
          }
 
-         const t = setTimeout(() => setTurnTimer(turnTimer - 1), 1000);
-         return () => clearTimeout(t);
+         // Süre Sıfırlandığında OTOMATİK SIRA DEĞİŞİMİ (Sadece Host Yapabilir)
+         if (turnTimer === 0 && room && !room.status.includes('_won') && mePlayer?.isHost && !isDealingPhase) {
+             let updatedRoom = { ...room };
+             
+             const log = { id: Date.now(), type: 'timeout', team: updatedRoom.currentTurn, playerName: 'Sistem', word: 'SÜRE BİTTİ', color: 'neutral' };
+             updatedRoom.gameLogs = [...(updatedRoom.gameLogs || []), log];
 
-     } else if (view === 'playing' && turnTimer === 0 && room && !room.status.includes('_won') && mePlayer?.isHost) {
-         // Süre bittiğinde sırayı karşıya geçir (Sadece Host Tetikler)
-         let updatedRoom = { ...room };
-         
-         const log = { id: Date.now(), type: 'timeout', team: updatedRoom.currentTurn, playerName: 'Sistem', word: 'SÜRE BİTTİ', color: 'neutral' };
-         updatedRoom.gameLogs = [...(updatedRoom.gameLogs || []), log];
-
-         updatedRoom.turnPhase = 'spymaster';
-         updatedRoom.currentTurn = updatedRoom.currentTurn === 'red' ? 'blue' : 'red';
-         updatedRoom.currentClue = null;
-         
-         broadcastSync(updatedRoom);
+             updatedRoom.turnPhase = 'spymaster';
+             updatedRoom.currentTurn = updatedRoom.currentTurn === 'red' ? 'blue' : 'red';
+             updatedRoom.currentClue = null;
+             
+             broadcastSync(updatedRoom);
+         }
      }
-  }, [turnTimer, view, room?.status]);
+  }, [turnTimer, view, isDealingPhase]);
 
   // 2. KICK WEBSOCKET BAĞLANTISI
   useEffect(() => {
@@ -212,7 +261,7 @@ export default function CodenamesGame() {
                   dislikes: msg === '0' ? prev.dislikes + 1 : prev.dislikes,
                   voters: new Set(prev.voters).add(user)
                 };
-                channel?.send({ type: 'broadcast', event: 'kickUpdate', payload: { likes: updated.likes, dislikes: updated.dislikes } });
+                socket?.emit('kickUpdate', { roomId: room?.id, payload: { likes: updated.likes, dislikes: updated.dislikes } });
                 return updated;
               });
             }
@@ -222,43 +271,79 @@ export default function CodenamesGame() {
     };
     connectToKick();
     return () => { if (ws) ws.close(); };
-  }, [introTarget, kickConfirmed, kickChannelName, mePlayer]);
+  }, [introTarget, kickConfirmed, kickChannelName, mePlayer, socket, room?.id]);
 
-  // 3. SUPABASE REALTIME & HANDSHAKE & PRESENCE SİSTEMİ
+  // 3. SOCKET.IO SİSTEMİ (Odaya Katılma ve Senkronizasyon)
   useEffect(() => {
-    if (!room?.id || isEnvMissing) return;
-    const roomChannel = supabase.channel(`room:${room.id}`);
+    if (!room?.id || !socket) return;
     
-    roomChannel
-      .on('broadcast', { event: 'sync' }, ({ payload }) => {
-        setRoom(payload.room);
-        if (payload.room.meetingScores) setMeetingScores(payload.room.meetingScores);
+    socket.emit('joinRoom', room.id);
+
+    const handleSync = (payload: any) => {
+        const syncRoom = payload.room;
         
-        if (payload.room.isMeetingActive !== undefined) {
-           setMeetingView(payload.room.isMeetingActive);
+        // KURUCU ODADAN ÇIKTI VEYA SİLDİYSE (HER ŞEYİ SIFIRLAMA EKLENDİ)
+        const me = roomRef.current?.players?.find((p: any) => p.sessionId === sessionId);
+        if (syncRoom.status === 'deleted') {
+            if (me && !me.isHost) {
+                alert("Lobi kurucusu ayrıldığı için lobi silindi. Lobi listesine yönlendiriliyorsunuz.");
+            }
+            
+            // HER ŞEYİ SIFIRLA VE UNUT
+            socket?.emit('stopTimer', syncRoom.id);
+            if (tickAudioRef.current) {
+                tickAudioRef.current.pause();
+                tickAudioRef.current.currentTime = 0;
+            }
+            setTurnTimer(60);
+            setClueWord('');
+            setClueCount(1);
+            setIsDealingPhase(false);
+            hasDealtRef.current = false;
+            setShowTurnBanner(null);
+            prevTurnRef.current = null;
+            setPeekedCards(new Set());
+            setMeetingScores({});
+            setIntroTarget(null);
+            setIntroTimer(0);
+            setLobbyVotes({});
+            setKickVotes({ likes: 0, dislikes: 0, voters: new Set() });
+
+            setRoom(null);
+            setView('room_list');
+            setShowLeaveConfirm(false);
+            setMeetingView(false);
+            return;
         }
 
-        // Lobiye Dönüş Durumu
-        if (payload.room.status === 'waiting' && view === 'playing') {
+        setRoom(syncRoom);
+        if (syncRoom.meetingScores) setMeetingScores(syncRoom.meetingScores);
+        
+        if (syncRoom.isMeetingActive !== undefined) {
+           setMeetingView(syncRoom.isMeetingActive);
+        }
+
+        if (syncRoom.status === 'waiting' && view === 'playing') {
             hasDealtRef.current = false;
-            setPeekedCards(new Set()); // Kart bakma durumlarını sıfırla
+            setPeekedCards(new Set());
             setView('lobby');
         }
 
-        if (payload.room.status === 'playing' && view !== 'playing') {
-            // DİĞER OYUNCULAR İÇİN KUTU ANİMASYONUNU TETİKLEME (ALT-TAB KORUMALI)
+        if (syncRoom.status === 'playing' && view !== 'playing') {
             if (!hasDealtRef.current) {
                 hasDealtRef.current = true;
                 if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
                     setIsDealingPhase(true);
-                    setTimeout(() => setIsDealingPhase(false), 2600); // Toplam 2.5s süren animasyon için
+                    // Animasyonumuz tam 4.5 saniye sürüyor
+                    setTimeout(() => setIsDealingPhase(false), 4500);
                 }
             }
             setView('playing');
             setMeetingView(false);
         }
-      })
-      .on('broadcast', { event: 'requestSync' }, ({ payload }) => {
+    };
+
+    const handleRequestSync = (payload: any) => {
         const currentRoom = roomRef.current;
         const me = currentRoom?.players?.find((p: any) => p.sessionId === sessionId);
         
@@ -270,55 +355,79 @@ export default function CodenamesGame() {
                updatedRoom.players = [...currentRoom.players, payload.newPlayer];
                setRoom(updatedRoom);
            }
-           roomChannel.send({ type: 'broadcast', event: 'sync', payload: { room: updatedRoom } });
+           socket.emit('sync', { roomId: currentRoom.id, room: updatedRoom });
         }
-      })
-      .on('broadcast', { event: 'startIntro' }, ({ payload }) => {
-        setIntroTarget(payload);
+    };
+
+    const handleStartIntro = (target: any) => {
+        setIntroTarget(target);
         setLobbyVotes({});
         setKickVotes({ likes: 0, dislikes: 0, voters: new Set() });
         setIntroTimer(10);
-      })
-      .on('broadcast', { event: 'lobbyVote' }, ({ payload }) => {
+    };
+
+    const handleLobbyVote = (payload: any) => {
         setLobbyVotes(prev => ({ ...prev, [payload.voterId]: payload.vote }));
-      })
-      .on('broadcast', { event: 'kickUpdate' }, ({ payload }) => {
+    };
+
+    const handleKickUpdate = (payload: any) => {
         setKickVotes(prev => ({ ...prev, likes: payload.likes, dislikes: payload.dislikes }));
-      })
-      .on('broadcast', { event: 'endIntro' }, () => setIntroTarget(null))
-      .on('presence', { event: 'sync' }, () => {
-         const state = roomChannel.presenceState();
-         const allUsers = Object.values(state).flat();
-         const hasHost = allUsers.some((u: any) => u.isHost);
-         setHostPresent(hasHost);
-      })
-      .subscribe(async (status) => { 
-         if (status === 'SUBSCRIBED') {
-            setChannel(roomChannel);
-            const me = roomRef.current?.players?.find((p: any) => p.sessionId === sessionId);
-            await roomChannel.track({ sessionId, isHost: me?.isHost });
+    };
 
-            if (roomRef.current?.isSyncing) {
-               const newPlayer = { id: sessionId, sessionId, name: playerName, team: 'spectator', role: 'operative', isHost: false, connected: true };
-               roomChannel.send({ type: 'broadcast', event: 'requestSync', payload: { newPlayer } });
-            }
-         } 
-      });
+    const handleEndIntro = () => {
+        setIntroTarget(null);
+    };
 
-    return () => { supabase.removeChannel(roomChannel); };
-  }, [room?.id, isEnvMissing, sessionId, playerName, view]);
+    socket.on('sync', handleSync);
+    socket.on('requestSync', handleRequestSync);
+    socket.on('startIntro', handleStartIntro);
+    socket.on('lobbyVote', handleLobbyVote);
+    socket.on('kickUpdate', handleKickUpdate);
+    socket.on('endIntro', handleEndIntro);
+
+    if (roomRef.current?.isSyncing) {
+       const newPlayer = { id: sessionId, sessionId, name: playerName, team: 'spectator', role: 'operative', isHost: false, connected: true };
+       socket.emit('requestSync', { roomId: room.id, newPlayer });
+    }
+
+    return () => { 
+        socket.off('sync', handleSync);
+        socket.off('requestSync', handleRequestSync);
+        socket.off('startIntro', handleStartIntro);
+        socket.off('lobbyVote', handleLobbyVote);
+        socket.off('kickUpdate', handleKickUpdate);
+        socket.off('endIntro', handleEndIntro);
+    };
+  }, [room?.id, socket, sessionId, playerName, view]);
 
   // 4. OTOMATİK SİLİNME (SADECE ODADA KİMSE YOKSA)
   useEffect(() => {
     let timeout: NodeJS.Timeout;
     if (room && room.players && room.players.length === 0) {
         timeout = setTimeout(async () => {
-            if (isEnvMissing) return;
-            await supabase.from('active_codenames_rooms').delete().eq('id', room.id);
+            try {
+                await fetch(`${BACKEND_URL}/api/rooms/${room.id}`, { method: 'DELETE' });
+            } catch (e) {}
         }, 5 * 60 * 1000); 
     }
     return () => clearTimeout(timeout);
   }, [room?.players?.length]);
+
+  // 5. KURUCU SEKMEYİ VEYA TARAYICIYI KAPATIRSA LOBİYİ SİL
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      const currentRoom = roomRef.current;
+      const me = currentRoom?.players?.find((p: any) => p.sessionId === sessionId);
+      
+      if (currentRoom && me?.isHost) {
+          socket?.emit('sync', { roomId: currentRoom.id, room: { ...currentRoom, status: 'deleted' } });
+          fetch(`${BACKEND_URL}/api/rooms/${currentRoom.id}`, { method: 'DELETE', keepalive: true }).catch(()=>{});
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [socket, sessionId]);
 
   useEffect(() => {
     if (introTimer > 0) {
@@ -352,45 +461,81 @@ export default function CodenamesGame() {
     if (!createName.trim()) return;
     const roomId = Math.random().toString(36).substring(2, 9);
     const hash = createPass ? bcrypt.hashSync(createPass, 10) : null;
+    
+    // Rastgele ilk başlayan takımı seç
+    const initialStart = Math.random() < 0.5 ? 'red' : 'blue';
 
     const host: Player = { id: sessionId, sessionId, name: playerName, team: 'spectator', role: 'operative', isHost: true, connected: true };
     const newRoom = {
       id: roomId, name: createName, password: hash, status: 'waiting', players: [host],
-      settings: { spymasterTime: 90, operativeTime: 90, redName: 'KIRMIZI TAKIM', blueName: 'MAVİ TAKIM', introMode: false }, 
-      cards: [], currentTurn: 'red', turnPhase: 'spymaster', meetingScores: {}, currentClue: null, guessesLeft: 0, timeRemaining: 0, introCompleted: false, gameLogs: [], isMeetingActive: false
+      settings: { 
+          spymasterTime: 90, 
+          operativeTime: 90, 
+          redName: 'KIRMIZI TAKIM', 
+          blueName: 'MAVİ TAKIM', 
+          introMode: false, 
+          lastStartingTeam: initialStart,
+          customWords: [],
+          customWordProb: 0 
+      }, 
+      cards: [], currentTurn: initialStart, turnPhase: 'spymaster', meetingScores: {}, currentClue: null, guessesLeft: 0, timeRemaining: 0, introCompleted: false, gameLogs: [], isMeetingActive: false
     };
 
-    if (!isEnvMissing) {
-      await supabase.from('active_codenames_rooms').insert([{ id: roomId, name: createName, password: hash, status: 'waiting' }]);
+    try {
+        const res = await fetch(`${BACKEND_URL}/api/rooms`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: roomId, name: createName, password: hash, status: 'waiting' })
+        });
+        
+        if (!res.ok) {
+            alert("HATA: Oda veritabanına kaydedilemedi! Lütfen backend terminalini kontrol et.");
+            return;
+        }
+    } catch(err) {
+        console.error("API Oda oluşturma hatası:", err);
+        alert("HATA: Sunucuya bağlanılamadı. BACKEND_URL veya CORS ayarlarını kontrol et.");
+        return;
     }
+    
     setRoom(newRoom);
     setView('lobby');
   };
 
   const handleJoinRoom = async (roomId: string, sid = sessionId, sname = playerName) => {
-    if (isEnvMissing) return alert("Veritabanı bağlı değil!");
-    
-    const { data, error } = await supabase.from('active_codenames_rooms').select('*').eq('id', roomId).single();
-    if (error || !data) {
-       console.error("Join Room Hatası:", error);
-       alert("Oda bulunamadı veya silinmiş olabilir.");
-       return;
-    }
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/rooms/${roomId}`);
+      if (!res.ok) {
+         alert("Oda bulunamadı veya silinmiş olabilir. Backend bağlantını kontrol et.");
+         return;
+      }
+      const data = await res.json();
+      
+      if (data.password) {
+        const pass = prompt("Oda şifresini girin:");
+        if (!pass || !bcrypt.compareSync(pass, data.password)) return alert("Yanlış şifre!");
+      }
 
-    if (data.password) {
-      const pass = prompt("Oda şifresini girin:");
-      if (!pass || !bcrypt.compareSync(pass, data.password)) return alert("Yanlış şifre!");
+      setRoom({ id: roomId, name: data.name, isSyncing: true, players: [] });
+      setView('lobby');
+    } catch (e) {
+      console.error("Join Room Hatası:", e);
+      alert("Sunucuya bağlanılamadı.");
     }
-
-    setRoom({ id: roomId, name: data.name, isSyncing: true, players: [] });
-    setView('lobby');
   };
 
   const broadcastSync = async (updatedRoom: any) => {
     setRoom(updatedRoom);
-    channel?.send({ type: 'broadcast', event: 'sync', payload: { room: updatedRoom } });
-    if (!isEnvMissing && updatedRoom.id && updatedRoom.status !== 'waiting') {
-      await supabase.from('active_codenames_rooms').update({ status: updatedRoom.status }).eq('id', updatedRoom.id);
+    socket?.emit('sync', { roomId: updatedRoom.id, room: updatedRoom });
+    
+    if (updatedRoom.id && updatedRoom.status !== 'waiting') {
+      try {
+          await fetch(`${BACKEND_URL}/api/rooms/${updatedRoom.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status: updatedRoom.status })
+          });
+      } catch (e) {}
     }
   };
 
@@ -398,7 +543,7 @@ export default function CodenamesGame() {
     if (!mePlayer?.isHost) return;
     if (meetingResults[target.sessionId]) return; 
 
-    channel?.send({ type: 'broadcast', event: 'startIntro', payload: target });
+    socket?.emit('startIntro', { roomId: room.id, target });
     setIntroTarget(target);
     setLobbyVotes({});
     setKickVotes({ likes: 0, dislikes: 0, voters: new Set() });
@@ -418,13 +563,13 @@ export default function CodenamesGame() {
     
     setMeetingScores(newScores);
     broadcastSync({ ...room, meetingScores: newScores });
-    channel?.send({ type: 'broadcast', event: 'endIntro' });
+    socket?.emit('endIntro', room.id);
     setIntroTarget(null);
   };
 
   const castLobbyVote = (vote: 'like' | 'dislike') => {
     setLobbyVotes(prev => ({ ...prev, [sessionId]: vote }));
-    channel?.send({ type: 'broadcast', event: 'lobbyVote', payload: { voterId: sessionId, vote } });
+    socket?.emit('lobbyVote', { roomId: room.id, payload: { voterId: sessionId, vote } });
   };
 
   const switchRole = (team: Team, role: Role) => {
@@ -445,21 +590,87 @@ export default function CodenamesGame() {
     if (!room) return;
     
     let dbWords: string[] = [];
-    if (!isEnvMissing) {
-      try {
-        const { data } = await supabase.from('codenames_words').select('word').limit(50);
-        if (data && data.length >= 25) {
-          dbWords = data.map(d => d.word);
-        }
-      } catch (e) { console.error("Kelime çekme hatası", e); }
-    }
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/words`);
+      if (res.ok) {
+         const data = await res.json();
+         if (Array.isArray(data) && data.length > 0) {
+           
+           // Backend'den gelen veriyi "is_special" hatalarına karşı TAM KORUMAYA (Zırha) alıyoruz.
+           const mappedData = data.map((d: any) => {
+              if (typeof d === 'string') {
+                  return { word: d, is_special: KNOWN_SPECIALS.includes(d.toUpperCase()) };
+              }
+              // Backend is_special kolonunu düzgün iletmezse diye bilinen şehirlere de fallback attık
+              const isSpec = d.is_special === true || d.is_special === 'true' || d.is_special === 1 || d.is_special === '1' || d.is_special === 't' || KNOWN_SPECIALS.includes((d.word || '').toUpperCase());
+              return { word: d.word || '', is_special: isSpec };
+           }).filter((d: any) => d.word);
+           
+           // Ayrıştırma işlemi
+           const specialWords = mappedData.filter((d: any) => d.is_special).map((d: any) => d.word).sort(() => 0.5 - Math.random());
+           const normalWords = mappedData.filter((d: any) => !d.is_special).map((d: any) => d.word).sort(() => 0.5 - Math.random());
+           
+           // ÖZEL KELİMELERİ ASLA VE ASLA MAKS 3Ü GEÇMEYECEK ŞEKİLDE ZORLUYORUZ
+           const maxSpecialAllowed = Math.min(3, specialWords.length);
+           const specialCount = Math.floor(Math.random() * (maxSpecialAllowed + 1)); 
+           const selectedSpecials = specialWords.slice(0, specialCount);
 
-    const sourceWords = dbWords.length >= 25 ? dbWords : FALLBACK_WORDS;
+           // ÖZEL KELİME HAVUZU (CUSTOM WORDS) SEÇİMİ
+           let selectedCustoms: string[] = [];
+           const customWords = room.settings?.customWords || [];
+           const customProb = room.settings?.customWordProb || 0;
+           
+           if (customWords.length > 0 && customProb > 0) {
+               const poolSize = customWords.length;
+               let pickCount = 0;
+               if (customProb === 1) { // az
+                   pickCount = Math.floor(Math.random() * (Math.max(2, poolSize * 0.3))); 
+               } else if (customProb === 2) { // biraz
+                   pickCount = Math.floor(Math.random() * (Math.max(3, poolSize * 0.6))); 
+               } else if (customProb === 3) { // çok
+                   // En az 1 garantili, gerisi ihtimalli
+                   pickCount = 1 + Math.floor(Math.random() * poolSize);
+               }
+               
+               pickCount = Math.min(pickCount, poolSize); // Limit to pool
+               pickCount = Math.min(pickCount, 25 - selectedSpecials.length); // Limit to available slots
+               
+               const shuffledCustoms = [...customWords].sort(() => 0.5 - Math.random());
+               selectedCustoms = shuffledCustoms.slice(0, pickCount);
+           }
+           
+           // Kalan boşlukları NORMAL kelimelerle TAM OLARAK 25'e tamamlıyoruz
+           const neededNormal = 25 - selectedSpecials.length - selectedCustoms.length;
+           // Özel havuzdakilerle normal havuzdakiler çakışmasın diye filtreliyoruz
+           const availableNormalWords = normalWords.filter((w: string) => !selectedCustoms.includes(w));
+           const selectedNormals = availableNormalWords.slice(0, neededNormal);
+           
+           let combined = [...selectedSpecials, ...selectedCustoms, ...selectedNormals];
+           
+           // Eğer yeterli veri yoksa ve 25 olmadıysa, sabit dosyadaki normal kelimelerle dolduruyoruz
+           if (combined.length < 25) {
+             const remaining = 25 - combined.length;
+             const fallbacks = FALLBACK_WORDS.filter(w => !combined.includes(w)).slice(0, remaining);
+             combined = [...combined, ...fallbacks];
+           }
+           
+           dbWords = combined.sort(() => 0.5 - Math.random()); 
+         }
+      }
+    } catch (e) { console.error("Kelime çekme hatası", e); }
+
+    const sourceWords = dbWords.length === 25 ? dbWords : [...FALLBACK_WORDS].sort(() => 0.5 - Math.random()).slice(0, 25);
     const selectedWords = [...sourceWords].sort(() => 0.5 - Math.random()).slice(0, 25);
-    const colors = [...Array(9).fill('red'), ...Array(8).fill('blue'), ...Array(7).fill('neutral'), 'assassin'].sort(() => 0.5 - Math.random());
+    
+    // Başlangıç takımı seçimi (Sırayla değişir veya ilk kurulumdan gelir)
+    const startTeam = room.currentTurn || 'red';
+    // Başlayan takımın kartı 9, diğerinin 8 olur. Suikastçi her zaman 1, Nötr 7
+    const redCount = startTeam === 'red' ? 9 : 8;
+    const blueCount = startTeam === 'blue' ? 9 : 8;
+    
+    const colors = [...Array(redCount).fill('red'), ...Array(blueCount).fill('blue'), ...Array(7).fill('neutral'), 'assassin'].sort(() => 0.5 - Math.random());
 
     const cards: Card[] = selectedWords.map((word, i) => ({
-      // Tasarımın rastgele seçilmesi için karta 1 ile 10 arasında random bir sayı atıyoruz
       id: i, word, color: colors[i] as any, revealed: false, votes: [], designId: Math.floor(Math.random() * 10) + 1 
     }));
 
@@ -467,7 +678,7 @@ export default function CodenamesGame() {
         ...room, 
         status: 'playing', 
         turnPhase: 'spymaster', 
-        currentTurn: 'red', 
+        currentTurn: startTeam, 
         cards,
         currentClue: null,
         guessesLeft: 0,
@@ -476,12 +687,12 @@ export default function CodenamesGame() {
         isMeetingActive: false
     };
     
-    // HOST İÇİN KUTU ANİMASYONUNU TETİKLEME (ALT-TAB KORUMALI)
     if (!hasDealtRef.current) {
         hasDealtRef.current = true;
         if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             setIsDealingPhase(true);
-            setTimeout(() => setIsDealingPhase(false), 2600); 
+            // Animasyon artık tam 4.5 saniye sürüyor (kartların sıralı dizilmesi ve kutunun çıkışı dahil)
+            setTimeout(() => setIsDealingPhase(false), 4500); 
         }
     }
 
@@ -579,12 +790,31 @@ export default function CodenamesGame() {
 
   const returnToLobby = () => {
     if (!room || !mePlayer?.isHost) return;
+    
+    // OYUN İÇİ STATELERİ SIFIRLA
+    socket?.emit('stopTimer', room.id);
+    if (tickAudioRef.current) {
+        tickAudioRef.current.pause();
+        tickAudioRef.current.currentTime = 0;
+    }
+    
     hasDealtRef.current = false;
-    setPeekedCards(new Set()); // Bütün bakılan kartları sıfırla
+    setPeekedCards(new Set());
+    setTurnTimer(60);
+    setShowTurnBanner(null);
+    prevTurnRef.current = null;
+    setClueWord('');
+    setClueCount(1);
+    setIsDealingPhase(false);
+    
+    // BİR SONRAKİ ELİN BAŞLAMA SIRASINI DEĞİŞTİRİYORUZ
+    const nextStart = room.settings?.lastStartingTeam === 'red' ? 'blue' : 'red';
+    
     const updatedRoom = { 
         ...room, 
         status: 'waiting',
-        currentTurn: 'red',
+        currentTurn: nextStart,
+        settings: { ...room.settings, lastStartingTeam: nextStart },
         turnPhase: 'spymaster',
         currentClue: null,
         guessesLeft: 0,
@@ -595,14 +825,47 @@ export default function CodenamesGame() {
     setView('lobby');
   }
 
-  const leaveRoom = () => {
+  const leaveRoom = async () => {
     if (!room) {
         setView('room_list');
         return;
     }
-    const updatedPlayers = room.players.filter((p: any) => p.sessionId !== sessionId);
-    const updatedRoom = { ...room, players: updatedPlayers };
-    broadcastSync(updatedRoom);
+    
+    // ZAMANLAYICIYI VE SESİ DURDUR
+    socket?.emit('stopTimer', room.id);
+    if (tickAudioRef.current) {
+        tickAudioRef.current.pause();
+        tickAudioRef.current.currentTime = 0;
+    }
+
+    if (mePlayer?.isHost) {
+        const deletedRoom = { ...room, status: 'deleted' };
+        socket?.emit('sync', { roomId: room.id, room: deletedRoom });
+        try {
+            await fetch(`${BACKEND_URL}/api/rooms/${room.id}`, { method: 'DELETE' });
+        } catch (e) {}
+    } else {
+        const updatedPlayers = room.players.filter((p: any) => p.sessionId !== sessionId);
+        const updatedRoom = { ...room, players: updatedPlayers };
+        broadcastSync(updatedRoom);
+    }
+
+    // ESKİ OYUNA DAİR HER ŞEYİ SİL VE SIFIRLA (Kullanıcı adı hariç)
+    setTurnTimer(60);
+    setClueWord('');
+    setClueCount(1);
+    setIsDealingPhase(false);
+    hasDealtRef.current = false;
+    setShowTurnBanner(null);
+    prevTurnRef.current = null;
+    setPeekedCards(new Set());
+    setMeetingScores({});
+    setMeetingView(false);
+    setIntroTarget(null);
+    setIntroTimer(0);
+    setLobbyVotes({});
+    setKickVotes({ likes: 0, dislikes: 0, voters: new Set() });
+
     setView('room_list');
     setRoom(null);
     setShowLeaveConfirm(false);
@@ -628,11 +891,6 @@ export default function CodenamesGame() {
         </div>
         
         <motion.form initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} onSubmit={handleLogin} className="w-full max-w-md bg-white/[0.06] border border-white/10 p-8 rounded-3xl shadow-2xl backdrop-blur-xl relative z-10">
-          {isEnvMissing && (
-            <div className="absolute top-0 left-0 w-full bg-red-600/80 text-white text-xs font-bold text-center py-1">
-              DİKKAT: .env.local yapılandırılmadı!
-            </div>
-          )}
           
           <div className="flex justify-center mb-6 mt-4">
              <div className="flex h-20 w-20 items-center justify-center rounded-2xl border border-white/10 bg-gradient-to-br from-purple-500/40 via-blue-500/40 to-cyan-400/40 shadow-xl shadow-cyan-400/20">
@@ -874,22 +1132,62 @@ export default function CodenamesGame() {
           )}
         </AnimatePresence>
 
+        {/* ÖZEL KELİME EKLEME MODALI */}
+        <AnimatePresence>
+          {showWordModal && (
+            <div className="fixed inset-0 bg-black/90 z-[200] flex items-center justify-center p-4 backdrop-blur-md">
+               <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-[#110D17] border border-white/10 rounded-3xl p-8 max-w-lg w-full shadow-2xl relative flex flex-col">
+                  <button onClick={() => setShowWordModal(false)} className="absolute top-6 right-6 text-white/50 hover:text-white transition-colors"><X size={24}/></button>
+                  <h3 className="text-2xl font-black text-white mb-2 flex items-center gap-2"><Pencil size={24} className="text-emerald-400"/> ÖZEL KELİME EKLE</h3>
+                  <p className="text-white/40 text-xs font-medium mb-6">Her satıra bir kelime yazın. Sadece benzersiz olanlar eklenecektir.</p>
+                  
+                  <textarea 
+                    value={customWordsInput}
+                    onChange={(e) => setCustomWordsInput(e.target.value)}
+                    className="w-full h-48 bg-black/40 border border-white/10 rounded-xl p-4 text-white text-sm outline-none focus:border-emerald-400/50 resize-none font-mono tracking-widest placeholder:text-white/20"
+                    placeholder="ELMA&#10;ARMUT&#10;KİRAZ"
+                  />
+                  <div className="mt-2 text-xs font-bold text-emerald-400">
+                    Benzersiz Kelime: {Array.from(new Set(customWordsInput.split('\n').map(w => w.trim().toUpperCase()).filter(w => w.length > 0))).length}
+                  </div>
+
+                  <div className="mt-8 bg-white/5 p-4 rounded-xl border border-white/5">
+                     <div className="flex justify-between items-center text-white/50 text-xs font-bold mb-3"><span>Çıkma İhtimali</span> <span className="text-white bg-white/10 px-2 py-0.5 rounded">{['Yok', 'Az', 'Biraz', 'Çok'][customWordProb]}</span></div>
+                     <input type="range" min="0" max="3" step="1" value={customWordProb} onChange={(e) => setCustomWordProb(parseInt(e.target.value))} className="w-full accent-emerald-500 bg-black/50 h-1.5 rounded-full appearance-none outline-none cursor-pointer" />
+                     <div className="flex justify-between text-[10px] font-bold text-white/40 mt-3 px-1">
+                        <span className={customWordProb === 0 ? 'text-emerald-400' : ''}>Yok</span>
+                        <span className={customWordProb === 1 ? 'text-emerald-400' : ''}>Az</span>
+                        <span className={customWordProb === 2 ? 'text-emerald-400' : ''}>Biraz</span>
+                        <span className={customWordProb === 3 ? 'text-emerald-400' : ''}>Çok</span>
+                     </div>
+                  </div>
+
+                  <button onClick={() => {
+                     const unique = Array.from(new Set(customWordsInput.split('\n').map(w => w.trim().toUpperCase()).filter(w => w.length > 0)));
+                     broadcastSync({...room, settings: {...room.settings, customWords: unique, customWordProb}});
+                     setShowWordModal(false);
+                  }} className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-black p-4 rounded-xl mt-6 transition-all shadow-[0_0_15px_rgba(16,185,129,0.3)] active:scale-95">KAYDET</button>
+               </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
         <div className="flex-1 flex flex-col p-4 md:p-8 max-w-[1400px] w-full mx-auto relative z-10">
             {/* LOBİ UI HEADER */}
-            <header className="flex flex-wrap justify-between items-center mb-8 gap-4 bg-white/[0.04] backdrop-blur-xl border border-white/10 p-4 rounded-3xl shadow-xl">
+            <header className="h-16 flex flex-wrap justify-between items-center mb-8 gap-4 bg-white/[0.04] backdrop-blur-xl border border-white/10 p-4 rounded-3xl shadow-xl">
                <div className="flex items-center gap-4">
                    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 via-blue-500 to-cyan-400 shadow-lg shadow-cyan-400/20">
                       <Sparkles size={24} className="text-white" />
                    </div>
                    <div>
-                       <h1 className="text-2xl font-black text-white leading-none tracking-tight">Mekip<span className="text-cyan-300">Hub</span></h1>
+                       <h1 className="text-3xl font-black text-white leading-none tracking-tight">Mekip<span className="text-cyan-300">Hub</span></h1>
                        <p className="text-xs text-white/50 font-medium uppercase tracking-widest mt-0.5">Operasyon Lobisi</p>
                    </div>
                </div>
                
                <div className="flex items-center gap-3 bg-black/40 px-6 py-3 rounded-2xl border border-white/5">
                   <span className="text-white/50 font-bold text-sm">ODA:</span>
-                  <span className="text-white font-black tracking-[0.3em] flex items-center text-lg">
+                  <span className="text-white font-black tracking-[0.3em] flex items-center text-xl">
                      {showRoomCode ? room.id : (
                        <span className="flex gap-1">
                          <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
@@ -898,24 +1196,24 @@ export default function CodenamesGame() {
                        </span>
                      )}
                   </span>
-                  <button onClick={() => setShowRoomCode(!showRoomCode)} className="text-white/40 hover:text-cyan-300 ml-4 transition-colors">{showRoomCode ? <EyeOff size={18}/> : <Eye size={18}/>}</button>
-                  <button onClick={() => navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${room.id}`)} className="text-white/40 hover:text-cyan-300 ml-1 transition-colors"><Copy size={18}/></button>
+                  <button onClick={() => setShowRoomCode(!showRoomCode)} className="text-white/40 hover:text-cyan-300 ml-4 transition-colors">{showRoomCode ? <EyeOff size={20}/> : <Eye size={20}/>}</button>
+                  <button onClick={() => navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${room.id}`)} className="text-white/40 hover:text-cyan-300 ml-1 transition-colors"><Copy size={20}/></button>
                </div>
                
                <div className="flex gap-3">
-                  <span className="bg-white/5 border border-white/10 px-5 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 text-white"><Users size={18} className="text-cyan-400"/> {room.players.length} Ajan</span>
+                  <span className="bg-white/5 border border-white/10 px-5 py-3 rounded-2xl text-base font-bold flex items-center gap-2 text-white"><Users size={20} className="text-cyan-400"/> {room.players.length} Ajan</span>
                   
                   {/* TAKIM VE ROL VURGUSU */}
-                  <span className={`border px-5 py-3 rounded-2xl text-lg font-black flex items-center gap-2 uppercase tracking-wide shadow-lg
+                  <span className={`border px-5 py-3 rounded-2xl text-xl font-black flex items-center gap-2 uppercase tracking-wide shadow-lg
                     ${mePlayer?.team === 'red' ? 'bg-red-500/20 border-red-500/50 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : 
                       mePlayer?.team === 'blue' ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.2)]' : 
                       'bg-white/5 border-white/10 text-white'}
                   `}>
-                      {mePlayer?.role === 'spymaster' ? <Settings size={22} className="animate-spin-slow"/> : <Search size={22}/>} 
-                      {mePlayer?.name} <span className="text-[10px] opacity-60 font-medium tracking-normal ml-1">({mePlayer?.role === 'spymaster' ? 'Şef' : 'Ajan'})</span>
+                      {mePlayer?.role === 'spymaster' ? <Settings size={24} className="animate-spin-slow"/> : <Search size={24}/>} 
+                      {mePlayer?.name} <span className="text-[11px] opacity-60 font-medium tracking-normal ml-1">({mePlayer?.role === 'spymaster' ? 'Şef' : 'Ajan'})</span>
                   </span>
 
-                  <button onClick={() => setShowLeaveConfirm(true)} className="bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500 hover:text-white px-5 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 transition-all"><LogOut size={18}/> Çıkış</button>
+                  <button onClick={() => setShowLeaveConfirm(true)} className="bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500 hover:text-white px-5 py-3 rounded-2xl text-base font-bold flex items-center gap-2 transition-all"><LogOut size={20}/> Çıkış</button>
                </div>
             </header>
 
@@ -1037,7 +1335,7 @@ export default function CodenamesGame() {
 
                {/* SAĞ KISIM: DURUM VE AYARLAR */}
                <div className="w-full lg:w-96 flex flex-col gap-6">
-                  
+                 
                   {/* OYUN DURUMU KARTI */}
                   <div className="bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-[24px] p-6 shadow-xl relative overflow-hidden group">
                      <div className="absolute -left-20 -bottom-20 h-40 w-40 rounded-full bg-violet-500/10 blur-3xl transition group-hover:bg-violet-500/20"></div>
@@ -1099,7 +1397,7 @@ export default function CodenamesGame() {
                                    return;
                                 }
                                 broadcastSync({...room, settings: {...room.settings, introMode: !room.settings.introMode}});
-                             }} className={`w-12 h-6 rounded-full relative transition-colors border ${room.settings?.introMode ? 'bg-cyan-500 border-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.4)]' : 'bg-black/50 border-white/10'}`}>
+                              }} className={`w-12 h-6 rounded-full relative transition-colors border ${room.settings?.introMode ? 'bg-cyan-500 border-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.4)]' : 'bg-black/50 border-white/10'}`}>
                               <div className={`absolute top-[3px] w-4 h-4 bg-white rounded-full transition-all ${room.settings?.introMode ? 'left-[26px]' : 'left-[3px]'}`}/>
                            </button>
                         </div>
@@ -1122,14 +1420,14 @@ export default function CodenamesGame() {
                      </div>
 
                      {/* Kick Chat */}
-                     <div>
+                     <div className="border-b border-white/10 pb-6">
                         <div className="flex justify-between items-center mb-4">
                            <div className="flex items-center gap-3 text-white font-bold text-sm"><div className="p-1.5 bg-white/5 rounded-md border border-white/10"><MessageSquare size={16} className="text-red-400"/></div> Kick Chat</div>
                            <button disabled={!mePlayer?.isHost} onClick={() => {
                                 const newState = !kickEnabled;
                                 setKickEnabled(newState);
                                 if (!newState && room.settings.introMode) broadcastSync({...room, settings: {...room.settings, introMode: false}});
-                             }} className={`w-12 h-6 rounded-full relative transition-colors border ${kickEnabled ? 'bg-red-500 border-red-400 shadow-[0_0_10px_rgba(239,68,68,0.4)]' : 'bg-black/50 border-white/10'}`}>
+                              }} className={`w-12 h-6 rounded-full relative transition-colors border ${kickEnabled ? 'bg-red-500 border-red-400 shadow-[0_0_10px_rgba(239,68,68,0.4)]' : 'bg-black/50 border-white/10'}`}>
                               <div className={`absolute top-[3px] w-4 h-4 bg-white rounded-full transition-all ${kickEnabled ? 'left-[26px]' : 'left-[3px]'}`}/>
                            </button>
                         </div>
@@ -1155,6 +1453,24 @@ export default function CodenamesGame() {
                            </div>
                         )}
                      </div>
+
+                     {/* Özel Kelimeler */}
+                     <div className="pt-2">
+                        <div className="flex justify-between items-center mb-4">
+                           <div className="flex items-center gap-3 text-white font-bold text-sm"><div className="p-1.5 bg-white/5 rounded-md border border-white/10"><Pencil size={16} className="text-emerald-400"/></div> Özel Kelimeler</div>
+                           <button disabled={!mePlayer?.isHost} onClick={() => {
+                                setCustomWordsInput(room.settings?.customWords?.join('\n') || "");
+                                setCustomWordProb(room.settings?.customWordProb || 0);
+                                setShowWordModal(true);
+                              }} className="bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                              DÜZENLE
+                           </button>
+                        </div>
+                        <div className="bg-black/20 border border-white/5 p-3 rounded-xl flex justify-between items-center">
+                           <p className="text-white/40 text-xs font-bold">Havuz: <span className="text-white/80">{room.settings?.customWords?.length || 0} kelime</span></p>
+                           <p className="text-white/40 text-xs font-bold">İhtimal: <span className="text-emerald-400">{['Yok', 'Az', 'Biraz', 'Çok'][room.settings?.customWordProb || 0]}</span></p>
+                        </div>
+                     </div>
                   </div>
                </div>
             </div>
@@ -1170,7 +1486,7 @@ export default function CodenamesGame() {
     const blueLeft = room.cards?.filter((c: any) => c.color === 'blue' && !c.revealed).length || 0;
 
     return (
-      <div className="min-h-screen bg-[#0A070E] flex flex-col text-slate-100 relative overflow-hidden font-sans">
+      <div className="h-screen w-full bg-[#0A070E] flex flex-col text-slate-100 relative overflow-hidden font-sans">
         {/* MekipHub Neon Background for Game Board */}
         <div className="neon-bg absolute inset-0 pointer-events-none z-0">
           <div className="neon-stars neon-stars-1"></div>
@@ -1203,9 +1519,6 @@ export default function CodenamesGame() {
             </div>
         )}
         
-        {/* OYUN BİTİŞ EKRANI (INPUT YERİNE AŞAĞIDA) */}
-        {/* Not: Orijinal tam ekran overlay pop-up kaldırıldı, yerine Input'un olduğu yere taşındı */}
-
         {/* SIRA DEĞİŞTİ BANNER ANİMASYONU */}
         <AnimatePresence>
            {showTurnBanner && (
@@ -1227,37 +1540,31 @@ export default function CodenamesGame() {
            )}
         </AnimatePresence>
 
-        {/* VİDEODAKİ EFSANEVİ 3D KUTU AÇILIŞ ANİMASYONU */}
+        {/* KUTU AÇILIŞ ANİMASYONU */}
         <AnimatePresence>
             {isDealingPhase && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
-                    {/* Kutu Alt (Bottom) */}
+                <div className="fixed inset-0 z-[160] flex items-center justify-center pointer-events-none">
+                    {/* Siyah Karartı */}
                     <motion.div
-                        initial={{ y: "100vh", x: "-50%" }}
-                        animate={{ y: ["100vh", "50vh", "50vh", "150vh"] }}
-                        transition={{ duration: 2.5, times: [0, 0.2, 0.7, 1], ease: "easeInOut" as const }}
-                        className="fixed top-0 left-1/2 w-72 h-72 md:w-80 md:h-80 bg-[#1C1412] rounded-3xl shadow-[0_40px_80px_rgba(0,0,0,0.9)] flex items-center justify-center border-b-[12px] border-r-[12px] border-[#0A0706] z-40"
+                        initial={{ opacity: 1 }}
+                        animate={{ opacity: [1, 1, 0, 0] }}
+                        transition={{ duration: 4.5, times: [0, 0.11, 0.266, 1], ease: "easeInOut" }}
+                        className="absolute inset-0 bg-[#0A070E] z-[160]"
+                    />
+                    {/* Kutu (DİKDÖRTGEN TASARIM İÇİN GÜNCELLENDİ) */}
+                    <motion.div
+                        initial={{ y: "-20vh", scale: 1.5 }}
+                        animate={{ y: ["-20vh", "-20vh", "35vh", "35vh", "150vh", "150vh"], scale: [1.5, 1.5, 1, 1, 1, 1] }}
+                        transition={{ duration: 4.5, times: [0, 0.11, 0.266, 0.444, 0.622, 1], ease: "easeInOut" }}
+                        className="absolute w-[24rem] h-[32rem] z-[170] flex items-center justify-center drop-shadow-[0_0_80px_rgba(0,0,0,0.9)]"
                         style={{ 
-                            backgroundImage: "url('/box-bottom.png')", // KENDİ ALT KUTU RESMİNİ BURAYA KOY
+                            backgroundImage: "url('/box.png')", 
                             backgroundSize: "contain", 
                             backgroundRepeat: "no-repeat", 
                             backgroundPosition: "center" 
                         }}
-                    />
-
-                    {/* Kutu Üst (Lid) */}
-                    <motion.div
-                        initial={{ y: "100vh", x: "-50%" }}
-                        animate={{ y: ["100vh", "50vh", "-100vh", "-100vh"] }}
-                        transition={{ duration: 2.5, times: [0, 0.2, 0.35, 1], ease: "easeInOut" as const }}
-                        className="fixed top-0 left-1/2 w-[18.5rem] h-[18.5rem] md:w-[21rem] md:h-[21rem] bg-[#2A1D1A] rounded-3xl shadow-[0_50px_100px_rgba(0,0,0,0.95)] flex items-center justify-center border-t-[8px] border-l-[8px] border-white/5 z-50"
-                        style={{ 
-                            backgroundImage: "url('/box-lid.png')", // KENDİ KAPAK RESMİNİ BURAYA KOY
-                            backgroundSize: "contain", 
-                            backgroundRepeat: "no-repeat", 
-                            backgroundPosition: "center" 
-                        }}
-                    />
+                    >
+                    </motion.div>
                 </div>
             )}
         </AnimatePresence>
@@ -1280,14 +1587,14 @@ export default function CodenamesGame() {
         </AnimatePresence>
 
         {/* LOBİ UI HEADER (Küçük ve şık) */}
-        <header className="h-14 bg-white/[0.04] backdrop-blur-xl border-b border-white/10 flex justify-between items-center px-6 shrink-0 z-20">
+        <header className="h-16 bg-white/[0.04] backdrop-blur-xl border-b border-white/10 flex justify-between items-center px-6 shrink-0 z-20">
            <div className="flex items-center gap-3 bg-black/40 px-4 py-1.5 rounded-lg border border-white/5">
-              <span className="text-white/50 font-bold text-xs">Oda Kodu:</span>
-              <span className="text-white font-black tracking-[0.2em] text-xs">
+              <span className="text-white/50 font-bold text-sm">Oda Kodu:</span>
+              <span className="text-white font-black tracking-[0.2em] text-sm">
                  {showRoomCode ? room.id : '••••••'}
               </span>
-              <button onClick={() => setShowRoomCode(!showRoomCode)} className="text-white/40 hover:text-cyan-300 ml-2 transition-colors">{showRoomCode ? <EyeOff size={14}/> : <Eye size={14}/>}</button>
-              <button onClick={() => navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${room.id}`)} className="text-white/40 hover:text-cyan-300 ml-1 transition-colors"><Copy size={14}/></button>
+              <button onClick={() => setShowRoomCode(!showRoomCode)} className="text-white/40 hover:text-cyan-300 ml-2 transition-colors">{showRoomCode ? <EyeOff size={16}/> : <Eye size={16}/>}</button>
+              <button onClick={() => navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${room.id}`)} className="text-white/40 hover:text-cyan-300 ml-1 transition-colors"><Copy size={16}/></button>
            </div>
            
            <div className="flex items-center gap-4">
@@ -1295,56 +1602,57 @@ export default function CodenamesGame() {
                  <div className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-purple-500 via-blue-500 to-cyan-400">
                     <Sparkles size={12} className="text-white" />
                  </div>
-                 <span className="text-white font-black text-sm tracking-tight hidden sm:block">Mekip<span className="text-cyan-300">Hub</span></span>
+                 <span className="text-white font-black text-base tracking-tight hidden sm:block">Mekip<span className="text-cyan-300">Hub</span></span>
               </div>
-              <span className="bg-black/40 text-white/50 border border-white/5 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2"><Users size={14}/> {room.players.length}</span>
-              <div className="bg-black/40 border border-white/5 px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2">
+              <span className="bg-black/40 text-white/50 border border-white/5 px-3 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2"><Users size={16}/> {room.players.length}</span>
+              <div className="bg-black/40 border border-white/5 px-4 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2">
                  <span className="text-white/50">Sırası:</span>
                  <span className={room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-400'}>{room.currentTurn === 'red' ? (room.settings?.redName || 'KIRMIZI TAKIM') : (room.settings?.blueName || 'MAVİ TAKIM')}</span>
               </div>
            </div>
            
            <div className="flex gap-2">
-              <span className="bg-black/40 text-white/80 border border-white/5 px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2"><Settings size={14} className="text-violet-400"/> {mePlayer?.name}</span>
-              <button onClick={() => setShowLeaveConfirm(true)} className="bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors"><LogOut size={14}/></button>
+              <span className="bg-black/40 text-white/80 border border-white/5 px-4 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2"><Settings size={16} className="text-violet-400"/> {mePlayer?.name}</span>
+              <button onClick={() => setShowLeaveConfirm(true)} className="bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-colors"><LogOut size={16}/></button>
            </div>
         </header>
 
-        <div className="flex-1 flex gap-4 p-4 overflow-hidden z-10">
+        {/* EKRANIN AŞAĞI KAYMASINI ENGELLEYEN SABİT ALAN: "overflow-hidden", "min-h-0", "h-full" kullanıldı */}
+        <div className="flex-1 flex gap-4 p-4 overflow-hidden z-10 min-h-0">
             
             {/* SOL PANEL (KIRMIZI TAKIM VE ZAMANLAYICI) */}
-            <aside className="w-64 flex flex-col gap-4 shrink-0 overflow-y-auto hidden md:flex">
-                <div className="bg-gradient-to-b from-red-950/40 to-black/40 rounded-2xl p-4 flex flex-col items-center border border-red-500/20 shadow-lg relative overflow-hidden text-center min-h-[300px] backdrop-blur-md">
+            <aside className="w-72 flex flex-col gap-4 shrink-0 overflow-y-auto hidden md:flex h-full min-h-0">
+                <div className="bg-gradient-to-b from-red-950/40 to-black/40 rounded-2xl p-4 flex flex-col items-center border border-red-500/20 shadow-lg relative overflow-hidden text-center min-h-[340px] shrink-0 backdrop-blur-md">
                     <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-red-500/10 to-transparent pointer-events-none opacity-50"></div>
-                    <h2 className="text-lg font-black text-red-100 mb-2 relative z-10 uppercase tracking-wide drop-shadow-sm">{room.settings?.redName || 'KIRMIZI TAKIM'}</h2>
-                    <div className="text-7xl font-black text-red-400 mb-1 relative z-10 leading-none drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">{redLeft}</div>
-                    <div className="text-[10px] font-bold text-red-200/50 mb-6 relative z-10 uppercase tracking-[0.3em]">KALAN KART</div>
+                    <h2 className="text-xl font-black text-red-100 mb-2 relative z-10 uppercase tracking-wide drop-shadow-sm">{room.settings?.redName || 'KIRMIZI TAKIM'}</h2>
+                    <div className="text-8xl font-black text-red-400 mb-1 relative z-10 leading-none drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">{redLeft}</div>
+                    <div className="text-xs font-bold text-red-200/50 mb-6 relative z-10 uppercase tracking-[0.3em]">KALAN KART</div>
                     
                     <div className="space-y-2 w-full relative z-10">
                         {room.players.filter((p:any)=>p.team==='red'&&p.role==='spymaster').map((p:any)=> 
-                           <div key={p.sessionId} className="bg-red-500/20 border border-red-500/30 text-red-100 font-bold text-xs py-2 px-3 rounded-xl flex items-center justify-center gap-2"><ShieldAlert size={14} className="text-red-400"/> {p.name}</div>
+                           <div key={p.sessionId} className="bg-red-500/20 border border-red-500/30 text-red-100 font-bold text-sm py-2 px-3 rounded-xl flex items-center justify-center gap-2"><ShieldAlert size={16} className="text-red-400"/> {p.name}</div>
                         )}
                         <div className="grid grid-cols-2 gap-2 mt-2">
                            {room.players.filter((p:any)=>p.team==='red'&&p.role==='operative').map((p:any)=> 
-                              <div key={p.sessionId} className="bg-black/40 border border-white/5 text-white/70 font-medium text-xs py-2 px-2 rounded-xl truncate hover:border-white/10 transition-colors">{p.name}</div>
+                              <div key={p.sessionId} className="bg-black/40 border border-white/5 text-white/70 font-medium text-sm py-2 px-2 rounded-xl truncate hover:border-white/10 transition-colors">{p.name}</div>
                            )}
                         </div>
                     </div>
                 </div>
 
                 {/* SÜRE KARTI */}
-                <div className="bg-white/[0.04] backdrop-blur-md rounded-2xl p-5 border border-white/10 flex flex-col items-center justify-center shadow-lg relative">
+                <div className="bg-white/[0.04] backdrop-blur-md rounded-2xl p-6 border border-white/10 flex flex-col items-center justify-center shadow-lg relative shrink-0">
                    {/* Süre dolduğunda yanıp sönen uyarı */}
                    {turnTimer === 0 && !isGameOver && (
                        <div className="absolute top-2 right-2 flex items-center gap-1 text-red-500 animate-pulse">
-                           <AlertTriangle size={14}/>
-                           <span className="text-[10px] font-black uppercase">Sıra Değişti</span>
+                           <AlertTriangle size={16}/>
+                           <span className="text-xs font-black uppercase">Sıra Değişti</span>
                        </div>
                    )}
-                   <div className="flex items-center gap-2 text-violet-400 text-[10px] font-bold uppercase tracking-widest mb-3">
-                      <Clock size={14}/> {room.turnPhase === 'spymaster' ? 'İstihbarat Şefi Süresi' : 'Ajan Süresi'}
+                   <div className="flex items-center gap-2 text-violet-400 text-xs font-bold uppercase tracking-widest mb-3">
+                      <Clock size={16}/> {room.turnPhase === 'spymaster' ? 'İstihbarat Şefi Süresi' : 'Ajan Süresi'}
                    </div>
-                   <div className={`text-4xl font-black mb-3 font-mono drop-shadow-md ${turnTimer <= 10 ? 'text-red-500 animate-pulse' : 'text-white'}`}>
+                   <div className={`text-5xl font-black mb-3 font-mono drop-shadow-md ${turnTimer <= 10 ? 'text-red-500 animate-pulse' : 'text-white'}`}>
                       0:{turnTimer.toString().padStart(2, '0')}
                    </div>
                    <div className="w-full h-1.5 bg-black/50 rounded-full overflow-hidden border border-white/5">
@@ -1354,41 +1662,49 @@ export default function CodenamesGame() {
             </aside>
 
             {/* ORTA OYUN IZGARASI VE INPUT */}
-            <main className="flex-1 flex flex-col items-center justify-center pb-8 overflow-y-auto">
-              {/* GRID - KART BOYUTLARI SABİTLENDİ (177px x 107px) */}
-              <div className="grid grid-cols-5 gap-3 w-max shrink-0 relative mt-[-4vh]">
+            <main className="flex-1 flex flex-col items-center justify-center pb-8 overflow-y-auto h-full relative">
+              {/* GRID - KART BOYUTLARI BÜYÜTÜLDÜ (205px x 125px) VE AŞAĞI KAYDIRILDI (mt-2) */}
+              <div className="grid grid-cols-5 gap-4 w-max shrink-0 relative mt-2">
                 {room.cards.map((card: any, index: number) => {
                   const amISpymaster = mePlayer?.role === 'spymaster';
-                  const isRevealed = card.revealed || isGameOver;
                   
-                  // Şefin renkleri görebilmesi için (Şef için gösterilecek mi? Kapanan kartların opaklığını azalt)
+                  // "isActuallyRevealed" sadece ajanın oyun sırasında bilerek açtığı karttır (Oyun sonunu kapsamaz)
+                  const isActuallyRevealed = card.revealed; 
                   const isColorVisibleToSpymaster = amISpymaster;
-                  const showColor = isRevealed || isColorVisibleToSpymaster;
+                  const showColor = isActuallyRevealed || isColorVisibleToSpymaster || isGameOver;
                   const isPeeked = peekedCards.has(card.id);
                   
                   // RENK VE DOSYA İSMİ MANTIĞI
                   const imgColor = card.color === 'neutral' ? 'white' : card.color === 'assassin' ? 'black' : card.color;
                   
-                  // MEKIP HUB TEMASINA UYGUN KART STİLLERİ
+                  // MEKIP HUB TEMASINA UYGUN KART STİLLERİ (YENİ OPAKLIK VE GÖRÜNÜM)
                   const getCardStyle = () => {
-                    // Eğer kart açılmışsa normal stil
-                    if (isRevealed) {
-                        if (card.color === 'red') return { outer: "bg-red-600", pill: "hidden", text: "hidden" };
-                        if (card.color === 'blue') return { outer: "bg-cyan-600", pill: "hidden", text: "hidden" };
-                        if (card.color === 'neutral') return { outer: "bg-white", pill: "hidden", text: "hidden" };
-                        return { outer: "bg-zinc-900", pill: "hidden", text: "hidden" };
+                    // 1. AJAN TARAFINDAN GERÇEKTEN AÇILMIŞ KART
+                    if (isActuallyRevealed) {
+                        let baseOuter = "";
+                        let peekText = "";
+                        if (card.color === 'red') { baseOuter = "bg-red-500/80 border border-red-500/80"; peekText = "text-red-100 drop-shadow-sm"; }
+                        else if (card.color === 'blue') { baseOuter = "bg-cyan-500/80 border border-cyan-500/80"; peekText = "text-cyan-100 drop-shadow-sm"; }
+                        else if (card.color === 'neutral') { baseOuter = "bg-white/40 border border-white/50"; peekText = "text-white/90"; }
+                        else { baseOuter = "bg-zinc-900/95 border border-zinc-500"; peekText = "text-white"; }
+                        
+                        return { 
+                            outer: baseOuter, 
+                            pill: isPeeked ? "bg-black/90 border border-white/20" : "hidden", 
+                            text: isPeeked ? peekText : "hidden" 
+                        };
                     }
 
-                    // Henüz açılmamış ama ŞEF'in gördüğü renkler (Soluk olacak ki Mekipnames yazısı okunsun)
-                    if (isColorVisibleToSpymaster) {
-                        if (card.color === 'red') return { outer: "bg-red-900/40 border border-red-500/30", pill: "bg-black/60 border border-white/10", text: "text-red-300 drop-shadow-sm" };
-                        if (card.color === 'blue') return { outer: "bg-cyan-900/40 border border-cyan-500/30", pill: "bg-black/60 border border-white/10", text: "text-cyan-300 drop-shadow-sm" };
-                        if (card.color === 'neutral') return { outer: "bg-white/10 border border-white/20", pill: "bg-black/60 border border-white/10", text: "text-white/70" };
-                        return { outer: "bg-black/80 border border-zinc-700", pill: "bg-red-900/80 border border-red-500/50", text: "text-white" };
+                    // 2. ŞEF EKRANI veya OYUN BİTTİĞİNDE AÇILMAYAN KARTLAR (Opaklık arttırıldı: /40 yerine /80 ve /90 kullanıldı)
+                    if (showColor) {
+                        if (card.color === 'red') return { outer: "bg-red-700/80 border-2 border-red-500/60", pill: "bg-black/80 border border-white/20", text: "text-red-200 drop-shadow-sm" };
+                        if (card.color === 'blue') return { outer: "bg-cyan-700/80 border-2 border-cyan-500/60", pill: "bg-black/80 border border-white/20", text: "text-cyan-200 drop-shadow-sm" };
+                        if (card.color === 'neutral') return { outer: "bg-white/30 border-2 border-white/40 backdrop-blur-md", pill: "bg-black/80 border border-white/20", text: "text-white/90" };
+                        return { outer: "bg-black/95 border-2 border-zinc-600", pill: "bg-red-900/90 border border-red-500/80", text: "text-white" };
                     }
 
-                    // Ajanlar İçin Normal Kapalı Kart
-                    return { outer: "bg-[#251f30] border border-white/10 shadow-[0_4px_0_rgba(255,255,255,0.05)]", pill: "bg-white/5 text-white/50 border border-white/5", text: "text-white/50" };
+                    // 3. OYUN İÇİNDE AJANLARIN GÖRDÜĞÜ KAPALI KART (Daha belirgin olması için rengi açıldı ve kenarlığı güçlendirildi)
+                    return { outer: "bg-[#352c46] border-2 border-white/20 shadow-[0_6px_0_rgba(255,255,255,0.08)]", pill: "bg-white/10 text-white/70 border border-white/10", text: "text-white/70" };
                   };
                   
                   const style = getCardStyle();
@@ -1398,49 +1714,64 @@ export default function CodenamesGame() {
                       .map((vId: string) => room.players.find((p: any) => p.sessionId === vId))
                       .filter((p: any) => p && p.team === mePlayer?.team);
 
-                  // KUSURSUZ DESTE (DECK) MATEMATİĞİ
+                  // KUSURSUZ DESTE (DECK) MATEMATİĞİ - YENİ VE DAHA AKICI SİNEMATİK VERSİYON
                   const col = index % 5;
                   const row = Math.floor(index / 5);
                   
-                  const cardWidth = 177; 
-                  const cardHeight = 107; 
-                  const gap = 12; 
+                  const cardWidth = 205; 
+                  const cardHeight = 125; 
+                  const gap = 16; 
                   
                   const startX = (2 - col) * (cardWidth + gap);
-                  const startY = (2 - row) * (cardHeight + gap) + 300; 
+                  // Başlangıçta kutunun içindeki konumu
+                  const startY = (2 - row) * (cardHeight + gap) + 400; 
                   
                   const inBoxY = startY; 
-                  const midY = startY - 350; 
-                  const deckRotation = (index * 7) % 8 - 4;
+                  // Deste Merkezi (deckY), ekranın tam ortasında kutudan çıkacakları yer
+                  const deckX = startX;
+                  const deckY = (2 - row) * (cardHeight + gap) - 50; 
 
                   const initialProps = isDealingPhase 
-                      ? { opacity: 0, x: startX, y: inBoxY, rotateZ: deckRotation }
+                      ? { opacity: 0, x: startX, y: inBoxY, rotateZ: 0 }
                       : { opacity: 1, x: 0, y: 0, rotateZ: 0 };
+
+                  // TOPLAM ANİMASYON 4.5 SANİYE SÜRER
+                  const duration = 4.5;
+                  const t1 = 0.266; // 1.2s -> Kutu aşağı inip durur, o sırada kartlar görünmez
+                  const t2 = 0.400; // 1.8s -> Kartlar tek parça deste halinde kutudan yükselir
+                  
+                  // Dağılım Gecikmesi: En üst sol (index 0) 2.0s'de başlar, alt sağ (index 24) 4.0s'de başlar.
+                  const flyStart = 2.0 + (index * 0.0833); 
+                  const flyEnd = flyStart + 0.4; // Her kart yerine 0.4 saniyede uçar
+                  const tFlyStart = flyStart / duration;
+                  const tFlyEnd = flyEnd / duration;
 
                   const animateProps = isDealingPhase
                       ? { 
-                          opacity: [0, 0, 1, 1, 1, 1, 1], 
-                          x: [startX, startX, startX, startX, startX, startX, 0], 
-                          y: [inBoxY, inBoxY, inBoxY, inBoxY, midY, midY, 0], 
-                          rotateZ: [deckRotation, deckRotation, deckRotation, deckRotation, deckRotation, deckRotation, 0]
+                          opacity: [0, 0, 1, 1, 1, 1], 
+                          x: [startX, startX, deckX, deckX, 0, 0], 
+                          y: [inBoxY, inBoxY, deckY, deckY, 0, 0], 
+                          scale: [0.5, 0.5, 1, 1, 1, 1],
+                          // Temiz bir görünüm için dağılımda rotasyonu kaldırdık
+                          rotateZ: [0, 0, 0, 0, 0, 0]
                         }
-                      : { opacity: 1, x: 0, y: 0, rotateZ: 0 };
+                      : { opacity: 1, x: 0, y: 0, scale: 1, rotateZ: 0 };
 
                   const transitionProps = isDealingPhase
                       ? {
-                          duration: 2.5, 
-                          times: [0, 0.2, 0.21, 0.35, 0.6, 0.7, 1], 
-                          ease: ["linear", "linear", "linear", "backOut", "linear", "easeOut"] as any,
-                          delay: 0 
+                          duration: duration, 
+                          // Framer motion'ın tip sisteminde ease'in string olmasıyla çakışmaması için as any verildi
+                          times: [0, t1, t2, tFlyStart, tFlyEnd, 1], 
+                          ease: "easeInOut"
                         }
                       : { duration: 0 };
 
                   return (
-                    <div key={card.id} className="relative z-10" style={{ width: '177px', height: '107px' }}>
+                    <div key={card.id} className="relative z-10" style={{ width: `${cardWidth}px`, height: `${cardHeight}px` }}>
                         <motion.div
                           onClick={() => {
-                            // GİZLİCE BAKMA (PEEKING) MANTIĞI: Eğer kart çoktan açılmışsa sadece resmin şeffaflığını değiştirip yazıyı göster
-                            if (card.revealed || isGameOver) {
+                            // Eğer ajan tarafından açılmış bir kartsa (isActuallyRevealed), aç-kapa (peeking) yap:
+                            if (isActuallyRevealed) {
                                 setPeekedCards(prev => {
                                     const next = new Set(prev);
                                     if (next.has(card.id)) next.delete(card.id);
@@ -1450,46 +1781,51 @@ export default function CodenamesGame() {
                                 return;
                             }
                             
-                            if (amISpymaster || !isMyTurn || !isOperativeTurn || isGameOver) return;
+                            // Eğer oyun bitmişse ama kart açılmamışsa, hiçbir şey yapma
+                            if (isGameOver) return;
+                            
+                            // Oyun devam ediyorsa, sıra bendeyse, ajansam ve kart açılmamışsa oy ver
+                            if (amISpymaster || !isMyTurn || !isOperativeTurn) return;
                             voteCard(card.id);
                           }}
                           initial={initialProps}
-                          animate={animateProps}
-                          transition={transitionProps}
-                          whileHover={(!isRevealed && !amISpymaster && isMyTurn && isOperativeTurn) ? { y: -2, boxShadow: '0 8px 15px rgba(0,0,0,0.3)' } : {}}
-                          whileTap={(!isRevealed && !amISpymaster && isMyTurn && isOperativeTurn) ? { y: 2, boxShadow: '0 0 0 transparent' } : {}}
-                          className={`absolute inset-0 rounded-xl flex items-center justify-center cursor-pointer select-none transition-all duration-200 overflow-hidden group p-2 ${style.outer} ${isRevealed ? 'shadow-none' : ''}`}
+                          animate={animateProps as any}
+                          transition={transitionProps as any}
+                          whileHover={(!isActuallyRevealed && !amISpymaster && isMyTurn && isOperativeTurn && !isGameOver) ? { y: -2, boxShadow: '0 8px 15px rgba(0,0,0,0.3)' } : {}}
+                          whileTap={(!isActuallyRevealed && !amISpymaster && isMyTurn && isOperativeTurn && !isGameOver) ? { y: 2, boxShadow: '0 0 0 transparent' } : {}}
+                          className={`absolute inset-0 rounded-xl flex items-center justify-center cursor-pointer select-none transition-all duration-200 overflow-hidden group p-2 ${style.outer} ${isActuallyRevealed ? 'shadow-none' : ''}`}
                         >
                           {/* SİLİK WATERMARK (MEKIP) - Henüz Açılmamışken Görünür */}
-                          {!isRevealed && (
+                          {!isActuallyRevealed && (
                              <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.02] z-0">
-                                <span className="font-black text-xl md:text-2xl lg:text-3xl tracking-[0.3em] text-white uppercase select-none drop-shadow-md">MEKIP</span>
+                                <span className="font-black text-2xl md:text-3xl lg:text-4xl tracking-[0.3em] text-white uppercase select-none drop-shadow-md">MEKIP</span>
                              </div>
                           )}
                           
-                          {/* AÇILDIĞINDA GELECEK RESİM VE ANİMASYONU (.png Formatı ile) */}
-                          {isRevealed && (
+                          {/* SADECE GERÇEKTEN AÇILAN KARTLARA RESİM BASILIR */}
+                          {/* YENİ MANTIK: Resim yukarı kaymaz, yukarıya yapışık kalır ve aşağıdan yukarıya doğru küçülür */}
+                          {isActuallyRevealed && (
                              <motion.div 
-                               initial={{ y: 0 }}
-                               animate={{ y: isPeeked ? -40 : 0 }} 
+                               initial={{ height: '100%' }}
+                               animate={{ height: isPeeked ? '70%' : '100%' }} 
                                transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-                               className={`absolute inset-0 bg-cover bg-center z-10 transition-opacity duration-300 ${isPeeked ? 'pointer-events-none border-b-2 border-dashed border-white/50' : 'opacity-100'}`}
+                               className={`absolute top-0 left-0 w-full bg-cover bg-center z-10 transition-opacity duration-300 ${isPeeked ? 'pointer-events-none' : 'opacity-100'}`}
                                style={{ backgroundImage: `url(/cards/${imgColor}/${card.designId}.png)` }}
                              />
                           )}
 
-                          {/* KELİME (PILL) KUTUSU - Kart Açılmamışsa Görünür VEYA Peeking Yapılıyorsa Görünür */}
-                          {(!card.revealed || isPeeked) && (
-                              <div className={`w-[95%] absolute bottom-2 flex justify-center py-1.5 shadow-sm z-20 rounded-lg backdrop-blur-md transition-all duration-300 ${style.pill}`}>
-                                  <span className={`font-black text-sm tracking-widest uppercase ${style.text || ''}`}>{card.word}</span>
+                          {/* KELİME KUTUSU (PILL) KÜÇÜLTÜLDÜ */}
+                          {(!isActuallyRevealed || isPeeked) && (
+                              <div className={`w-[85%] absolute bottom-1.5 flex justify-center py-1 shadow-sm z-20 rounded-md backdrop-blur-md transition-all duration-300 ${style.pill}`}>
+                                  <span className={`font-black text-xs tracking-widest uppercase ${style.text || ''}`}>{card.word}</span>
                               </div>
                           )}
 
                           {/* SOL ÜST KÖŞE: OY VEREN KİŞİLERİN İSİMLERİ */}
-                          {!isRevealed && votingPlayers.length > 0 && (
+                          {!isActuallyRevealed && votingPlayers.length > 0 && (
                             <div className="absolute top-1.5 left-1.5 flex flex-col gap-1 z-30 pointer-events-none">
                               {votingPlayers.map((p: any) => (
-                                <div key={p.sessionId} className={`px-2 py-0.5 rounded-md shadow-lg text-[9px] font-black border tracking-wider backdrop-blur-sm ${p.team === 'red' ? 'bg-red-600/90 border-red-400/50 text-white' : 'bg-cyan-600/90 border-cyan-400/50 text-white'}`}>
+                                <div key={p.sessionId} className={`px-2 py-0.5 rounded-md shadow-lg text-[11px] font-black border tracking-wider backdrop-blur-sm ${p.team === 'red' ? 'bg-red-600/90 border-red-400/50 text-white' : 'bg-cyan-600/90 border-cyan-400/50 text-white'}`}>
                                   {p.name}
                                 </div>
                               ))}
@@ -1497,19 +1833,19 @@ export default function CodenamesGame() {
                           )}
 
                           {/* ŞEFLER İÇİN SİYAH KART UYARISI */}
-                          {amISpymaster && !isRevealed && card.color === 'assassin' && (
-                            <div className="absolute top-2 left-2 opacity-80 z-30 bg-black/50 p-1.5 rounded-lg border border-red-500/30 backdrop-blur-md"><Search size={16} className="text-red-400 drop-shadow-sm"/></div>
+                          {amISpymaster && !isActuallyRevealed && card.color === 'assassin' && (
+                            <div className="absolute top-2 left-2 opacity-80 z-30 bg-black/50 p-1.5 rounded-lg border border-red-500/30 backdrop-blur-md"><Search size={20} className="text-red-400 drop-shadow-sm"/></div>
                           )}
                         </motion.div>
 
                         {/* SAĞ ÜST KÖŞE: DIŞARI TAŞAN DEVASA AÇMA (PARMAK) BUTONU */}
-                        {!isRevealed && !amISpymaster && isMyTurn && isOperativeTurn && card.votes.includes(sessionId) && (
+                        {!isActuallyRevealed && !amISpymaster && isMyTurn && isOperativeTurn && !isGameOver && card.votes.includes(sessionId) && (
                             <button 
                               onClick={(e) => { e.stopPropagation(); revealCard(card.id); }} 
                               className={`absolute -top-3 -right-3 text-white p-2.5 rounded-xl transition-all active:translate-y-1 active:shadow-[0_0_0_transparent] flex items-center justify-center z-[100] cursor-pointer border ${room.currentTurn === 'red' ? 'bg-gradient-to-br from-red-400 to-red-600 hover:from-red-300 hover:to-red-500 shadow-[0_4px_0_#991b1b,0_10px_15px_-3px_rgba(239,68,68,0.5)] border-red-200/50 hover:shadow-[0_6px_0_#991b1b,0_10px_20px_-3px_rgba(239,68,68,0.6)]' : 'bg-gradient-to-br from-cyan-400 to-blue-500 hover:from-cyan-300 hover:to-blue-400 shadow-[0_4px_0_#1e40af,0_10px_15px_-3px_rgba(34,211,238,0.5)] border-cyan-200/50 hover:shadow-[0_6px_0_#1e40af,0_10px_20px_-3px_rgba(34,211,238,0.6)]'}`}
                               title="Kartı Aç"
                             >
-                              <Hand size={20} className="drop-shadow-md" />
+                              <Hand size={24} className="drop-shadow-md" />
                             </button>
                         )}
                     </div>
@@ -1518,59 +1854,59 @@ export default function CodenamesGame() {
               </div>
 
               {/* INPUT ALANI (TAM GRID GENİŞLİĞİNDE) VE OYUN BİTİŞ YÖNETİMİ */}
-              <div className="w-full max-w-[900px] mt-8 flex gap-3 shrink-0 relative z-10">
+              <div className="w-full max-w-[1000px] mt-8 flex gap-3 shrink-0 relative z-10">
                  {isGameOver ? (
-                     <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-6 py-4 flex items-center justify-between shadow-lg">
+                     <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-8 py-5 flex items-center justify-between shadow-lg">
                         <div className="flex items-center gap-4">
                            <Crown size={32} className={room.status === 'red_won' ? 'text-red-400' : 'text-cyan-400'} />
                            <div>
                                <h2 className="text-xl font-black uppercase text-white tracking-widest">{room.status === 'red_won' ? localRedName : localBlueName} KAZANDI</h2>
-                               <p className="text-white/40 text-xs font-bold uppercase mt-1">OPERASYON TAMAMLANDI</p>
+                               <p className="text-white/40 text-sm font-bold uppercase mt-1">OPERASYON TAMAMLANDI</p>
                            </div>
                         </div>
                         {mePlayer?.isHost ? (
                             <button onClick={returnToLobby} className="bg-cyan-500 hover:bg-cyan-400 text-black px-6 py-3 rounded-xl font-black transition-all shadow-[0_0_15px_rgba(34,211,238,0.4)] flex items-center gap-2 active:scale-95">
-                                <RotateCcw size={18} /> LOBİYE ÇEK
+                                <RotateCcw size={20} /> LOBİYE ÇEK
                             </button>
                         ) : (
-                            <p className="text-white/30 text-sm font-bold animate-pulse">Kurucunun lobiyi kurması bekleniyor...</p>
+                            <p className="text-white/30 text-base font-bold animate-pulse">Kurucunun lobiyi kurması bekleniyor...</p>
                         )}
                      </div>
                  ) : mePlayer?.role === 'spymaster' && isMyTurn && isSpymasterTurn && !room.status.includes('_won') ? (
                     <>
-                       <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl p-1.5 flex shadow-lg transition-all focus-within:border-cyan-400/50 focus-within:bg-white/[0.06]">
-                          <div className="pl-4 pr-2 flex items-center text-white/30"><Pencil size={18}/></div>
+                       <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl p-2 flex shadow-lg transition-all focus-within:border-cyan-400/50 focus-within:bg-white/[0.06]">
+                          <div className="pl-4 pr-2 flex items-center text-white/30"><Pencil size={20}/></div>
                           <input 
                             value={clueWord}
                             onChange={e => setClueWord(e.target.value.replace(/\s/g, ''))}
                             placeholder="Tek kelimelik ipucu yazın..."
-                            className="flex-1 bg-transparent text-white px-2 py-2.5 outline-none uppercase font-black text-sm tracking-widest placeholder:text-white/20 placeholder:font-medium placeholder:tracking-normal"
+                            className="flex-1 bg-transparent text-white px-2 py-2.5 outline-none uppercase font-black text-base tracking-widest placeholder:text-white/20 placeholder:font-medium placeholder:tracking-normal"
                           />
                        </div>
-                       <div className="flex items-center bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl overflow-hidden shrink-0 shadow-lg p-1.5">
-                          <button onClick={() => setClueCount(prev => typeof prev === 'number' ? Math.max(1, prev - 1) : 1)} className="w-10 h-10 rounded-xl flex items-center justify-center hover:bg-white/10 text-white font-black transition-colors">-</button>
+                       <div className="flex items-center bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl overflow-hidden shrink-0 shadow-lg p-2">
+                          <button onClick={() => setClueCount(prev => typeof prev === 'number' ? Math.max(1, prev - 1) : 1)} className="w-12 h-12 rounded-xl flex items-center justify-center hover:bg-white/10 text-white font-black transition-colors">-</button>
                           <input 
                             type="text" 
                             value={clueCount === 'unlimited' ? '∞' : clueCount}
                             onChange={e => { const val = parseInt(e.target.value); if (!isNaN(val)) setClueCount(Math.min(9, Math.max(1, val))); }}
-                            className="w-12 bg-transparent text-center text-cyan-300 font-black outline-none text-lg"
+                            className="w-12 bg-transparent text-center text-cyan-300 font-black outline-none text-xl"
                           />
-                          <button onClick={() => setClueCount(prev => typeof prev === 'number' ? Math.min(9, prev + 1) : 1)} className="w-10 h-10 rounded-xl flex items-center justify-center hover:bg-white/10 text-white font-black transition-colors">+</button>
+                          <button onClick={() => setClueCount(prev => typeof prev === 'number' ? Math.min(9, prev + 1) : 1)} className="w-12 h-12 rounded-xl flex items-center justify-center hover:bg-white/10 text-white font-black transition-colors">+</button>
                        </div>
-                       <button onClick={submitClue} disabled={!clueWord} className={`text-white px-8 rounded-2xl font-black text-sm tracking-widest transition-all shrink-0 border border-white/10 disabled:border-transparent disabled:from-white/5 disabled:to-white/5 disabled:text-white/20 disabled:shadow-none bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-500 to-red-700 hover:from-red-400 hover:to-red-600 shadow-[0_0_20px_rgba(239,68,68,0.3)]' : 'from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 shadow-[0_0_20px_rgba(34,211,238,0.3)]'}`}>GÖNDER</button>
+                       <button onClick={submitClue} disabled={!clueWord} className={`text-white px-8 rounded-2xl font-black text-base tracking-widest transition-all shrink-0 border border-white/10 disabled:border-transparent disabled:from-white/5 disabled:to-white/5 disabled:text-white/20 disabled:shadow-none bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-500 to-red-700 hover:from-red-400 hover:to-red-600 shadow-[0_0_20px_rgba(239,68,68,0.3)]' : 'from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 shadow-[0_0_20px_rgba(34,211,238,0.3)]'}`}>GÖNDER</button>
                     </>
                  ) : mePlayer?.role === 'operative' && isMyTurn && isOperativeTurn && !room.status.includes('_won') ? (
                      // AJANLAR İÇİN TURU GEÇ (PASS) BUTONU
                      <div className="flex w-full gap-3">
-                         <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-6 py-4 flex items-center justify-center text-white/50 text-sm font-bold shadow-lg">
-                             <Search size={18} className="mr-2 text-white/30" /> Takım arkadaşlarınızla istihbaratı tartışıp hedefleri seçin.
+                         <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-8 py-5 flex items-center justify-center text-white/50 text-base font-bold shadow-lg">
+                             <Search size={20} className="mr-2 text-white/30" /> Takım arkadaşlarınızla istihbaratı tartışıp hedefleri seçin.
                          </div>
-                         <button onClick={skipTurn} className={`flex items-center gap-2 text-white px-8 rounded-2xl font-black text-sm tracking-widest transition-all shrink-0 border border-white/10 shadow-lg bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-900 to-black hover:from-red-800 border-red-500/30' : 'from-cyan-900 to-black hover:from-cyan-800 border-cyan-500/30'}`}>
-                             <FastForward size={18} /> PAS GEÇ
+                         <button onClick={skipTurn} className={`flex items-center gap-2 text-white px-8 rounded-2xl font-black text-base tracking-widest transition-all shrink-0 border border-white/10 shadow-lg bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-900 to-black hover:from-red-800 border-red-500/30' : 'from-cyan-900 to-black hover:from-cyan-800 border-cyan-500/30'}`}>
+                             <FastForward size={20} /> PAS GEÇ
                          </button>
                      </div>
                  ) : (
-                    <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-6 py-4 flex items-center justify-center text-white/50 text-sm font-bold shadow-lg">
+                    <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-8 py-5 flex items-center justify-center text-white/50 text-base font-bold shadow-lg">
                         Karşı merkezin hamlesini bekleyin veya takım arkadaşlarınızla istihbaratı tartışın...
                     </div>
                  )}
@@ -1578,35 +1914,35 @@ export default function CodenamesGame() {
             </main>
 
             {/* SAĞ PANEL (MAVİ TAKIM VE LOG) */}
-            <aside className="w-64 flex flex-col gap-4 shrink-0 overflow-y-auto hidden md:flex">
-                <div className="bg-gradient-to-b from-cyan-950/40 to-black/40 rounded-2xl p-4 flex flex-col items-center border border-cyan-500/20 shadow-lg relative overflow-hidden text-center min-h-[300px] backdrop-blur-md">
+            <aside className="w-72 flex flex-col gap-4 shrink-0 hidden md:flex h-full min-h-0">
+                <div className="bg-gradient-to-b from-cyan-950/40 to-black/40 rounded-2xl p-4 flex flex-col items-center border border-cyan-500/20 shadow-lg relative overflow-hidden text-center min-h-[340px] shrink-0 backdrop-blur-md">
                     <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-cyan-500/10 to-transparent pointer-events-none opacity-50"></div>
-                    <h2 className="text-lg font-black text-cyan-100 mb-2 relative z-10 uppercase tracking-wide drop-shadow-sm">{room.settings?.blueName || 'MAVİ TAKIM'}</h2>
-                    <div className="text-7xl font-black text-cyan-400 mb-1 relative z-10 leading-none drop-shadow-[0_0_15px_rgba(34,211,238,0.5)]">{blueLeft}</div>
-                    <div className="text-[10px] font-bold text-cyan-200/50 mb-6 relative z-10 uppercase tracking-[0.3em]">KALAN KART</div>
+                    <h2 className="text-xl font-black text-cyan-100 mb-2 relative z-10 uppercase tracking-wide drop-shadow-sm">{room.settings?.blueName || 'MAVİ TAKIM'}</h2>
+                    <div className="text-8xl font-black text-cyan-400 mb-1 relative z-10 leading-none drop-shadow-[0_0_15px_rgba(34,211,238,0.5)]">{blueLeft}</div>
+                    <div className="text-xs font-bold text-cyan-200/50 mb-6 relative z-10 uppercase tracking-[0.3em]">KALAN KART</div>
                     
                     <div className="space-y-2 w-full relative z-10">
                         {room.players.filter((p:any)=>p.team==='blue'&&p.role==='spymaster').map((p:any)=> 
-                           <div key={p.sessionId} className="bg-cyan-500/20 border border-cyan-500/30 text-cyan-100 font-bold text-xs py-2 px-3 rounded-xl flex items-center justify-center gap-2"><ShieldAlert size={14} className="text-cyan-400"/> {p.name}</div>
+                           <div key={p.sessionId} className="bg-cyan-500/20 border border-cyan-500/30 text-cyan-100 font-bold text-sm py-2 px-3 rounded-xl flex items-center justify-center gap-2"><ShieldAlert size={16} className="text-cyan-400"/> {p.name}</div>
                         )}
                         <div className="grid grid-cols-2 gap-2 mt-2">
                            {room.players.filter((p:any)=>p.team==='blue'&&p.role==='operative').map((p:any)=> 
-                              <div key={p.sessionId} className="bg-black/40 border border-white/5 text-white/70 font-medium text-xs py-2 px-2 rounded-xl truncate hover:border-white/10 transition-colors">{p.name}</div>
+                              <div key={p.sessionId} className="bg-black/40 border border-white/5 text-white/70 font-medium text-sm py-2 px-2 rounded-xl truncate hover:border-white/10 transition-colors">{p.name}</div>
                            )}
                         </div>
                     </div>
                 </div>
 
                 {/* GÜNLÜK (OYUN KAYDI) */}
-                <div className="bg-white/[0.04] backdrop-blur-md rounded-2xl border border-white/10 flex-1 flex flex-col overflow-hidden min-h-[300px] shadow-lg">
-                   <div className="p-4 border-b border-white/5 flex items-center gap-2 text-white/80 font-bold text-xs tracking-widest uppercase bg-black/20">
-                      <ScrollText size={14} className="text-violet-400"/> İSTİHBARAT GÜNLÜĞÜ
+                <div className="bg-white/[0.04] backdrop-blur-md rounded-2xl border border-white/10 flex-1 flex flex-col overflow-hidden min-h-0 shadow-lg">
+                   <div className="p-4 border-b border-white/5 flex items-center gap-2 text-white/80 font-bold text-sm tracking-widest uppercase bg-black/20 shrink-0">
+                      <ScrollText size={16} className="text-violet-400"/> İSTİHBARAT GÜNLÜĞÜ
                    </div>
                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
                       {room.currentClue && (
-                         <div className={`mb-5 border p-3 rounded-xl text-xs font-medium text-white/80 shadow-md ${room.currentTurn === 'red' ? 'bg-gradient-to-r from-red-500/20 to-black/20 border-red-500/30' : 'bg-gradient-to-r from-cyan-500/20 to-black/20 border-cyan-500/30'}`}>
-                            <div className="flex items-center gap-2 mb-1.5 opacity-70"><Info size={12}/> Aktif İpucu:</div>
-                            <strong className={`uppercase tracking-wider text-sm block ${room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-300'}`}>{room.currentClue.word} <span className="opacity-50">x</span>{room.currentClue.count}</strong>
+                         <div className={`mb-5 border p-3 rounded-xl text-sm font-medium text-white/80 shadow-md ${room.currentTurn === 'red' ? 'bg-gradient-to-r from-red-500/20 to-black/20 border-red-500/30' : 'bg-gradient-to-r from-cyan-500/20 to-black/20 border-cyan-500/30'}`}>
+                            <div className="flex items-center gap-2 mb-1.5 opacity-70"><Info size={14}/> Aktif İpucu:</div>
+                            <strong className={`uppercase tracking-wider text-base block ${room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-300'}`}>{room.currentClue.word} <span className="opacity-50">x</span>{room.currentClue.count}</strong>
                          </div>
                       )}
                       <div className="space-y-4">
@@ -1621,21 +1957,21 @@ export default function CodenamesGame() {
                            }
 
                            return (
-                               <div key={log.id} className="text-[11px] leading-relaxed relative pl-3 before:absolute before:left-0 before:top-1.5 before:w-1 before:h-1 before:rounded-full before:bg-white/20">
+                               <div key={log.id} className="text-xs leading-relaxed relative pl-3 before:absolute before:left-0 before:top-1.5 before:w-1 before:h-1 before:rounded-full before:bg-white/20">
                                   <span className={log.team === 'red' ? 'text-red-400 font-bold' : 'text-cyan-400 font-bold'}>{log.team === 'red' ? 'KRMZ' : 'MAVİ'}</span>{' '}
                                   <span className="text-white/40 truncate max-w-[50px] inline-block align-bottom">{log.playerName}</span>{' '}
                                   
                                   {log.type === 'clue' ? (
-                                     <span className="text-white/60 text-[10px]">ipucu verdi: <strong className={`uppercase tracking-wider text-[11px] ${log.team === 'red' ? 'text-red-400' : 'text-cyan-400'}`}>{log.word} <span className="opacity-50 text-[10px]">x</span>{log.count}</strong></span>
+                                     <span className="text-white/60 text-[11px]">ipucu verdi: <strong className={`uppercase tracking-wider text-xs ${log.team === 'red' ? 'text-red-400' : 'text-cyan-400'}`}>{log.word} <span className="opacity-50 text-[11px]">x</span>{log.count}</strong></span>
                                   ) : log.type === 'timeout' ? (
                                      <span className="text-amber-400 font-bold ml-1">SÜRESİ BİTTİ</span>
                                   ) : log.type === 'pass' ? (
                                      <span className="font-bold ml-1 text-white/50 bg-white/10 px-1.5 py-0.5 rounded">PAS GEÇİLDİ</span>
                                   ) : (
                                      <div className="mt-1 bg-black/20 p-1.5 rounded-lg border border-white/5">
-                                        {log.relatedClue && <div className="text-[9px] text-white/30 uppercase mb-0.5 leading-none">'{log.relatedClue}' için açıldı:</div>}
+                                        {log.relatedClue && <div className="text-[10px] text-white/30 uppercase mb-0.5 leading-none">'{log.relatedClue}' için açıldı:</div>}
                                         <span className={`uppercase font-black tracking-wider ${wordColorClass}`}>{log.word}</span>
-                                        <span className={`font-bold ml-2 px-1.5 py-0.5 rounded text-[9px] float-right ${log.color === log.team ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/20' : log.color === 'assassin' ? 'bg-red-900/50 text-red-500 border border-red-500/50' : 'bg-amber-500/20 text-amber-400 border border-amber-500/20'}`}>
+                                        <span className={`font-bold ml-2 px-1.5 py-0.5 rounded text-[10px] float-right ${log.color === log.team ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/20' : log.color === 'assassin' ? 'bg-red-900/50 text-red-500 border border-red-500/50' : 'bg-amber-500/20 text-amber-400 border border-amber-500/20'}`}>
                                            {log.color === log.team ? 'DOĞRU' : log.color === 'assassin' ? 'SUİKASTÇİ' : 'YANLIŞ'}
                                         </span>
                                      </div>
@@ -1644,7 +1980,7 @@ export default function CodenamesGame() {
                            );
                         })}
                       </div>
-                      {(!room.gameLogs || room.gameLogs.length === 0) && <div className="text-white/30 italic text-xs font-medium text-center mt-10">Henüz hamle yapılmadı.</div>}
+                      {(!room.gameLogs || room.gameLogs.length === 0) && <div className="text-white/30 italic text-sm font-medium text-center mt-10">Henüz hamle yapılmadı.</div>}
                    </div>
                 </div>
             </aside>
