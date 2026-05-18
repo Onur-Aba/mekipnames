@@ -3,11 +3,11 @@
 import { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle2, Hand, Search, Users, ShieldAlert, Crown, Copy, Settings, ArrowRight, AlertTriangle, ThumbsUp, ThumbsDown, X, Play, LogIn, Lock, Unlock, UserPlus, Info, ScrollText, LogOut, Clock, MessageSquare, Eye, EyeOff, Pencil, Sparkles, RotateCcw, Swords, FastForward } from 'lucide-react';
+import { CheckCircle2, Hand, Search, Users, ShieldAlert, Crown, Copy, Settings, ArrowRight, AlertTriangle, ThumbsUp, ThumbsDown, X, Play, LogIn, Lock, Unlock, UserPlus, Info, ScrollText, LogOut, Clock, MessageSquare, Eye, EyeOff, Pencil, Sparkles, RotateCcw, Swords, FastForward, Volume2, VolumeX } from 'lucide-react';
 import { Player, Room, Card, Team, Role } from '@/types';
 import bcrypt from 'bcryptjs';
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+const BACKEND_URL = 'https://mekipnamessocket.mekiphub.com';
 
 const FALLBACK_WORDS = ["ELMA", "AJAN", "KÖPEK", "UZAY", "MISIR", "ALTIN", "HÜCRE", "ZAMAN", "KILIÇ", "BOMBA", "MASA", "KEDİ", "KUŞ", "DENİZ", "OKUL", "OYUN", "TELEFON", "KALP", "RÜZGAR", "ATEŞ", "BİLGİSAYAR", "GÖZLÜK", "DUVAR", "KAPI", "PENCERE"];
 
@@ -36,6 +36,9 @@ export default function CodenamesGame() {
   const [showTurnBanner, setShowTurnBanner] = useState<Team | null>(null);
   const prevTurnRef = useRef<Team | null>(null);
 
+  // İPUCU ANİMASYONU İÇİN (Ortadan Sola Uçuş)
+  const [clueBanner, setClueBanner] = useState<{word: string, count: number|string, team: string} | null>(null);
+
   // YAZIYA GİZLİCE BAKMA (PEEKING) İÇİN LOKAL STATE
   const [peekedCards, setPeekedCards] = useState<Set<number>>(new Set());
 
@@ -43,6 +46,9 @@ export default function CodenamesGame() {
   const [showWordModal, setShowWordModal] = useState(false);
   const [customWordsInput, setCustomWordsInput] = useState('');
   const [customWordProb, setCustomWordProb] = useState<number>(0);
+
+  // GENEL SES SEVİYESİ (Default 100% -> 1)
+  const [volume, setVolume] = useState(1);
 
   const roomRef = useRef<any>(null);
   useEffect(() => { roomRef.current = room; }, [room]);
@@ -91,6 +97,13 @@ export default function CodenamesGame() {
   // SES EFEKTİ REFERANSI
   const tickAudioRef = useRef<HTMLAudioElement | null>(null);
 
+  // SES SEVİYESİ DEĞİŞTİĞİNDE UYGULA
+  useEffect(() => {
+    if (tickAudioRef.current) {
+        tickAudioRef.current.volume = volume;
+    }
+  }, [volume]);
+
   // SOCKET.IO BAĞLANTISI BAŞLATMA
   useEffect(() => {
     const newSocket = io(BACKEND_URL);
@@ -126,6 +139,7 @@ export default function CodenamesGame() {
 
     if (typeof window !== 'undefined') {
         tickAudioRef.current = new Audio('/tick.mp3');
+        if (tickAudioRef.current) tickAudioRef.current.volume = volume;
     }
   }, []);
 
@@ -157,6 +171,14 @@ export default function CodenamesGame() {
     prevTurnRef.current = room?.currentTurn || null;
 
   }, [room?.settings?.redName, room?.settings?.blueName, room?.currentTurn, view]);
+
+  // YENİ İPUCU GELDİĞİNDE ANİMASYONU TETİKLEME VE TEMİZLEME (Titreme engellendi)
+  useEffect(() => {
+      if (clueBanner) {
+          const timer = setTimeout(() => setClueBanner(null), 3000); // 3 Saniye ortada kalır, sonra sola uçar
+          return () => clearTimeout(timer);
+      }
+  }, [clueBanner]);
 
   // Oyun içi zamanlayıcı ve Süre Bittiğinde Sıra Değişimi
   useEffect(() => {
@@ -200,8 +222,8 @@ export default function CodenamesGame() {
   // SÜRE BİTİMİ VE SES EFEKTİ KONTROLÜ
   useEffect(() => {
      if (view === 'playing') {
-         // Son 10 saniye uyarı sesi (Sadece 1 Kere Oynaması için baştan sarılır)
-         if (turnTimer === 10 && mePlayer?.team === room?.currentTurn) {
+         // Son 10 saniye uyarı sesi (Artık oda içerisindeki HERKES için tetiklenir)
+         if (turnTimer === 10 && turnTimer > 0) {
              if (tickAudioRef.current) {
                  tickAudioRef.current.currentTime = 0;
                  tickAudioRef.current.play().catch(e => console.log("Ses oynatılamadı:", e));
@@ -281,9 +303,10 @@ export default function CodenamesGame() {
 
     const handleSync = (payload: any) => {
         const syncRoom = payload.room;
+        const currentRoom = roomRef.current;
         
-        // KURUCU ODADAN ÇIKTI VEYA SİLDİYSE (HER ŞEYİ SIFIRLAMA EKLENDİ)
-        const me = roomRef.current?.players?.find((p: any) => p.sessionId === sessionId);
+        // KURUCU ODADAN ÇIKTI VEYA SİLDİYSE
+        const me = currentRoom?.players?.find((p: any) => p.sessionId === sessionId);
         if (syncRoom.status === 'deleted') {
             if (me && !me.isHost) {
                 alert("Lobi kurucusu ayrıldığı için lobi silindi. Lobi listesine yönlendiriliyorsunuz.");
@@ -301,6 +324,7 @@ export default function CodenamesGame() {
             setIsDealingPhase(false);
             hasDealtRef.current = false;
             setShowTurnBanner(null);
+            setClueBanner(null);
             prevTurnRef.current = null;
             setPeekedCards(new Set());
             setMeetingScores({});
@@ -314,6 +338,13 @@ export default function CodenamesGame() {
             setShowLeaveConfirm(false);
             setMeetingView(false);
             return;
+        }
+
+        // YENİ İPUCU KONTROLÜ (Sadece gerçekten yeni bir ipucu geldiğinde animasyon tetiklenir, titremeyi önler)
+        const oldClue = currentRoom?.currentClue;
+        const newClue = syncRoom.currentClue;
+        if (newClue && (!oldClue || newClue.word !== oldClue.word || newClue.count !== oldClue.count)) {
+            setClueBanner({ word: newClue.word, count: newClue.count, team: syncRoom.currentTurn });
         }
 
         setRoom(syncRoom);
@@ -413,15 +444,20 @@ export default function CodenamesGame() {
     return () => clearTimeout(timeout);
   }, [room?.players?.length]);
 
-  // 5. KURUCU SEKMEYİ VEYA TARAYICIYI KAPATIRSA LOBİYİ SİL
+  // 5. KURUCU VEYA OYUNCU TARAYICIYI KAPATIRSA ANLIK LOBİDEN DÜŞÜRME
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       const currentRoom = roomRef.current;
       const me = currentRoom?.players?.find((p: any) => p.sessionId === sessionId);
       
-      if (currentRoom && me?.isHost) {
-          socket?.emit('sync', { roomId: currentRoom.id, room: { ...currentRoom, status: 'deleted' } });
-          fetch(`${BACKEND_URL}/api/rooms/${currentRoom.id}`, { method: 'DELETE', keepalive: true }).catch(()=>{});
+      if (currentRoom) {
+          if (me?.isHost) {
+              socket?.emit('sync', { roomId: currentRoom.id, room: { ...currentRoom, status: 'deleted' } });
+              fetch(`${BACKEND_URL}/api/rooms/${currentRoom.id}`, { method: 'DELETE', keepalive: true }).catch(()=>{});
+          } else {
+              const updatedPlayers = currentRoom.players.filter((p: any) => p.sessionId !== sessionId);
+              socket?.emit('sync', { roomId: currentRoom.id, room: { ...currentRoom, players: updatedPlayers } });
+          }
       }
     };
 
@@ -797,6 +833,9 @@ export default function CodenamesGame() {
     const log = { id: Date.now(), type: 'clue', team: updatedRoom.currentTurn, playerName: mePlayer?.name || 'Şef', word: clueWord.toUpperCase(), count: clueCount };
     updatedRoom.gameLogs = [...(updatedRoom.gameLogs || []), log];
 
+    // ŞEFİN EKRANINDA ANINDA GÖSTER (Göz kırpmayı önler, doğrudan tetikler)
+    setClueBanner({ word: updatedRoom.currentClue.word, count: updatedRoom.currentClue.count, team: updatedRoom.currentTurn });
+
     broadcastSync(updatedRoom);
     setClueWord('');
     setClueCount(1);
@@ -816,6 +855,7 @@ export default function CodenamesGame() {
     setPeekedCards(new Set());
     setTurnTimer(60);
     setShowTurnBanner(null);
+    setClueBanner(null);
     prevTurnRef.current = null;
     setClueWord('');
     setClueCount(1);
@@ -871,6 +911,7 @@ export default function CodenamesGame() {
     setIsDealingPhase(false);
     hasDealtRef.current = false;
     setShowTurnBanner(null);
+    setClueBanner(null);
     prevTurnRef.current = null;
     setPeekedCards(new Set());
     setMeetingScores({});
@@ -1188,7 +1229,7 @@ export default function CodenamesGame() {
 
         <div className="flex-1 flex flex-col p-4 md:p-8 max-w-[1400px] w-full mx-auto relative z-10">
             {/* LOBİ UI HEADER */}
-            <header className="h-16 flex flex-wrap justify-between items-center mb-8 gap-4 bg-white/[0.04] backdrop-blur-xl border border-white/10 p-4 rounded-3xl shadow-xl">
+            <header className="flex flex-wrap justify-between items-center mb-8 gap-4 bg-white/[0.04] backdrop-blur-xl border border-white/10 p-4 rounded-3xl shadow-xl">
                <div className="flex items-center gap-4">
                    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 via-blue-500 to-cyan-400 shadow-lg shadow-cyan-400/20">
                       <Sparkles size={24} className="text-white" />
@@ -1214,7 +1255,7 @@ export default function CodenamesGame() {
                   <button onClick={() => navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${room.id}`)} className="text-white/40 hover:text-cyan-300 ml-1 transition-colors"><Copy size={20}/></button>
                </div>
                
-               <div className="flex gap-3">
+               <div className="flex flex-wrap items-center gap-3">
                   <span className="bg-white/5 border border-white/10 px-5 py-3 rounded-2xl text-base font-bold flex items-center gap-2 text-white"><Users size={20} className="text-cyan-400"/> {room.players.length} Ajan</span>
                   
                   {/* TAKIM VE ROL VURGUSU */}
@@ -1554,6 +1595,30 @@ export default function CodenamesGame() {
            )}
         </AnimatePresence>
 
+        {/* İPUCU GELDİ ANİMASYONU (ORTADAN ÇIKIP SOLA GİDEN) */}
+        <AnimatePresence>
+           {clueBanner && (
+               <div className="fixed inset-0 z-[160] flex items-center justify-center pointer-events-none">
+                   <motion.div
+                       layoutId="clue-anim-box"
+                       initial={{ scale: 0.5, opacity: 0 }}
+                       animate={{ scale: 1, opacity: 1 }}
+                       exit={{ scale: 0.8, opacity: 0 }}
+                       transition={{ type: "spring", stiffness: 200, damping: 20 }}
+                       style={{ willChange: "transform, opacity" }}
+                       className={`px-16 py-10 rounded-[3rem] border-4 shadow-[0_0_100px_rgba(0,0,0,0.8)] flex flex-col items-center backdrop-blur-xl ${clueBanner.team === 'red' ? 'bg-red-950/90 border-red-500' : 'bg-cyan-950/90 border-cyan-400'}`}
+                   >
+                       <div className="flex items-center gap-3 text-white/50 font-bold mb-4 uppercase tracking-widest text-lg">
+                           <Info size={28}/> ŞEF İSTİHBARAT VERDİ
+                       </div>
+                       <div className={`text-8xl font-black uppercase tracking-widest drop-shadow-xl ${clueBanner.team === 'red' ? 'text-red-100' : 'text-cyan-100'}`}>
+                           {clueBanner.word} <span className="opacity-50 text-6xl">x</span>{clueBanner.count}
+                       </div>
+                   </motion.div>
+               </div>
+           )}
+        </AnimatePresence>
+
         {/* KUTU AÇILIŞ ANİMASYONU */}
         <AnimatePresence>
             {isDealingPhase && (
@@ -1575,7 +1640,8 @@ export default function CodenamesGame() {
                             backgroundImage: "url('/box.png')", 
                             backgroundSize: "contain", 
                             backgroundRepeat: "no-repeat", 
-                            backgroundPosition: "center" 
+                            backgroundPosition: "center",
+                            willChange: "transform"
                         }}
                     >
                     </motion.div>
@@ -1600,8 +1666,8 @@ export default function CodenamesGame() {
           )}
         </AnimatePresence>
 
-        {/* LOBİ UI HEADER (Küçük ve şık) */}
-        <header className="h-16 bg-white/[0.04] backdrop-blur-xl border-b border-white/10 flex justify-between items-center px-6 shrink-0 z-20">
+        {/* OYUN İÇİ ÜST BAR (Lobi ui'dan bağımsız yeni şık bar) */}
+        <header className="h-16 bg-white/[0.04] backdrop-blur-xl border-b border-white/10 flex flex-wrap justify-between items-center px-6 shrink-0 z-20 gap-4">
            <div className="flex items-center gap-3 bg-black/40 px-4 py-1.5 rounded-lg border border-white/5">
               <span className="text-white/50 font-bold text-sm">Oda Kodu:</span>
               <span className="text-white font-black tracking-[0.2em] text-sm">
@@ -1625,7 +1691,17 @@ export default function CodenamesGame() {
               </div>
            </div>
            
-           <div className="flex gap-2">
+           <div className="flex items-center gap-3">
+              {/* SES AYARI BURAYA TAŞINDI */}
+              <div className="flex items-center gap-2 bg-black/40 px-3 py-1.5 rounded-lg border border-white/5" title="Oyun Sesi">
+                  {volume === 0 ? <VolumeX size={16} className="text-white/40"/> : <Volume2 size={16} className="text-cyan-400"/>}
+                  <input 
+                      type="range" min="0" max="1" step="0.01" 
+                      value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} 
+                      className="w-16 sm:w-20 h-1.5 bg-white/10 rounded-full appearance-none outline-none accent-cyan-400 cursor-pointer"
+                  />
+              </div>
+
               <span className="bg-black/40 text-white/80 border border-white/5 px-4 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2"><Settings size={16} className="text-violet-400"/> {mePlayer?.name}</span>
               <button onClick={() => setShowLeaveConfirm(true)} className="bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-colors"><LogOut size={16}/></button>
            </div>
@@ -1673,6 +1749,28 @@ export default function CodenamesGame() {
                       <div className="h-full bg-gradient-to-r from-violet-500 to-cyan-400 transition-all duration-1000 ease-linear" style={{ width: `${(turnTimer / (room.turnPhase === 'spymaster' ? room.settings.spymasterTime : room.settings.operativeTime)) * 100}%` }}></div>
                    </div>
                 </div>
+
+                {/* AKTİF İPUCU (SOL PANEL ALT KISIM - KART GİBİ GÖRÜNEN KISIM) */}
+                <AnimatePresence>
+                    {!clueBanner && room.currentClue && (
+                        <motion.div
+                            layoutId="clue-anim-box"
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.8 }}
+                            transition={{ type: "spring", stiffness: 200, damping: 20 }}
+                            style={{ willChange: "transform, opacity" }}
+                            className={`mt-2 bg-white/[0.04] backdrop-blur-md rounded-2xl p-6 border flex flex-col items-center justify-center shadow-lg relative shrink-0 ${room.currentTurn === 'red' ? 'border-red-500/30' : 'border-cyan-500/30'}`}
+                        >
+                            <div className="flex items-center gap-2 text-white/50 text-xs font-bold uppercase tracking-widest mb-2">
+                                <Info size={16}/> AKTİF İPUCU
+                            </div>
+                            <div className={`text-3xl font-black uppercase tracking-widest text-center ${room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-300'}`}>
+                                {room.currentClue.word} <span className="opacity-50 text-xl mx-1">x</span>{room.currentClue.count}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </aside>
 
             {/* ORTA OYUN IZGARASI VE INPUT */}
@@ -1723,10 +1821,10 @@ export default function CodenamesGame() {
                   
                   const style = getCardStyle();
 
-                  // OY VEREN İSİMLERİ
+                  // OY VEREN İSİMLERİ (HERKES GÖREBİLİR OLDU)
                   const votingPlayers = card.votes
                       .map((vId: string) => room.players.find((p: any) => p.sessionId === vId))
-                      .filter((p: any) => p && p.team === mePlayer?.team);
+                      .filter((p: any) => p !== undefined); // Takım filtresi kaldırıldı
 
                   // KUSURSUZ DESTE (DECK) MATEMATİĞİ - YENİ VE DAHA AKICI SİNEMATİK VERSİYON
                   const col = index % 5;
@@ -1807,6 +1905,7 @@ export default function CodenamesGame() {
                           transition={transitionProps as any}
                           whileHover={(!isActuallyRevealed && !amISpymaster && isMyTurn && isOperativeTurn && !isGameOver) ? { y: -2, boxShadow: '0 8px 15px rgba(0,0,0,0.3)' } : {}}
                           whileTap={(!isActuallyRevealed && !amISpymaster && isMyTurn && isOperativeTurn && !isGameOver) ? { y: 2, boxShadow: '0 0 0 transparent' } : {}}
+                          style={{ willChange: "transform, opacity" }}
                           className={`absolute inset-0 rounded-xl flex items-center justify-center cursor-pointer select-none transition-all duration-200 overflow-hidden group p-2 ${style.outer} ${isActuallyRevealed ? 'shadow-none' : ''}`}
                         >
                           {/* SİLİK WATERMARK (MEKIP) - Henüz Açılmamışken Görünür */}
@@ -1824,7 +1923,7 @@ export default function CodenamesGame() {
                                animate={{ height: isPeeked ? '70%' : '100%' }} 
                                transition={{ type: 'spring', stiffness: 400, damping: 25 }}
                                className={`absolute top-0 left-0 w-full bg-cover bg-center z-10 transition-opacity duration-300 ${isPeeked ? 'pointer-events-none' : 'opacity-100'}`}
-                               style={{ backgroundImage: `url(/cards/${imgColor}/${card.designId}.png)` }}
+                               style={{ backgroundImage: `url(/cards/${imgColor}/${card.designId}.png)`, willChange: "height" }}
                              />
                           )}
 
@@ -1835,7 +1934,7 @@ export default function CodenamesGame() {
                               </div>
                           )}
 
-                          {/* SOL ÜST KÖŞE: OY VEREN KİŞİLERİN İSİMLERİ */}
+                          {/* SOL ÜST KÖŞE: OY VEREN KİŞİLERİN İSİMLERİ (Herkes görebilir) */}
                           {!isActuallyRevealed && votingPlayers.length > 0 && (
                             <div className="absolute top-1.5 left-1.5 flex flex-col gap-1 z-30 pointer-events-none">
                               {votingPlayers.map((p: any) => (
