@@ -14,7 +14,7 @@ const FALLBACK_WORDS = ["ELMA", "AJAN", "KÖPEK", "UZAY", "MISIR", "ALTIN", "HÜ
 // BACKEND NE GÖNDERİRSE GÖNDERSİN BUNLAR HER ZAMAN "ÖZEL KELİME" SAYILACAK KALKAN LİSTE
 const KNOWN_SPECIALS = [
     'İSTANBUL', 'TÜRKİYE', 'LONDRA', 'İNGİLTERE', 'PARİS', 'FRANSA', 'TOKYO', 'JAPONYA', 
-    'BERLİN', 'ALMANYA', 'ROMA', 'İITALYA', 'MADRİD', 'İSPANYA', 'MOSKOVA', 'AMERİKA', 
+    'BERLİN', 'ALMANYA', 'ROMA', 'İTALYA', 'MADRİD', 'İSPANYA', 'MOSKOVA', 'AMERİKA', 
     'PEKİN', 'ÇİN', 'BAKÜ', 'AZERBAYCAN'
 ];
 
@@ -670,9 +670,23 @@ export default function CodenamesGame() {
     
     const colors = [...Array(redCount).fill('red'), ...Array(blueCount).fill('blue'), ...Array(7).fill('neutral'), 'assassin'].sort(() => 0.5 - Math.random());
 
-    const cards: Card[] = selectedWords.map((word, i) => ({
-      id: i, word, color: colors[i] as any, revealed: false, votes: [], designId: Math.floor(Math.random() * 10) + 1 
-    }));
+    // İZİN VERİLEN KART TASARIMLARI (DOSYA İSİMLERİ)
+    const allowedDesigns = {
+      assassin: [1, 3],
+      blue: [1, 2, 3, 4],
+      red: [1, 2, 3, 4],
+      neutral: [1, 3, 4]
+    };
+
+    const cards: Card[] = selectedWords.map((word, i) => {
+      const cardColor = colors[i] as any;
+      const validDesigns = allowedDesigns[cardColor as keyof typeof allowedDesigns] || [1];
+      const randomDesignId = validDesigns[Math.floor(Math.random() * validDesigns.length)];
+
+      return {
+        id: i, word, color: cardColor, revealed: false, votes: [], designId: randomDesignId 
+      };
+    });
 
     const updatedRoom = { 
         ...room, 
@@ -1695,12 +1709,12 @@ export default function CodenamesGame() {
                         };
                     }
 
-                    // 2. ŞEF EKRANI veya OYUN BİTTİĞİNDE AÇILMAYAN KARTLAR (Opaklık arttırıldı: /40 yerine /80 ve /90 kullanıldı)
+                    // 2. ŞEF EKRANI veya OYUN BİTTİĞİNDE AÇILMAYAN KARTLAR
                     if (showColor) {
-                        if (card.color === 'red') return { outer: "bg-red-700/80 border-2 border-red-500/60", pill: "bg-black/80 border border-white/20", text: "text-red-200 drop-shadow-sm" };
-                        if (card.color === 'blue') return { outer: "bg-cyan-700/80 border-2 border-cyan-500/60", pill: "bg-black/80 border border-white/20", text: "text-cyan-200 drop-shadow-sm" };
-                        if (card.color === 'neutral') return { outer: "bg-white/30 border-2 border-white/40 backdrop-blur-md", pill: "bg-black/80 border border-white/20", text: "text-white/90" };
-                        return { outer: "bg-black/95 border-2 border-zinc-600", pill: "bg-red-900/90 border border-red-500/80", text: "text-white" };
+                        if (card.color === 'red') return { outer: "bg-red-700/60 border-2 border-red-500/50", pill: "bg-black/80 border border-white/20", text: "text-red-200 drop-shadow-sm" };
+                        if (card.color === 'blue') return { outer: "bg-cyan-700/60 border-2 border-cyan-500/50", pill: "bg-black/80 border border-white/20", text: "text-cyan-200 drop-shadow-sm" };
+                        if (card.color === 'neutral') return { outer: "bg-white/20 border-2 border-white/30 backdrop-blur-md", pill: "bg-black/80 border border-white/20", text: "text-white/90" };
+                        return { outer: "bg-black/80 border-2 border-zinc-600/80", pill: "bg-red-900/90 border border-red-500/80", text: "text-white" };
                     }
 
                     // 3. OYUN İÇİNDE AJANLARIN GÖRDÜĞÜ KAPALI KART (Daha belirgin olması için rengi açıldı ve kenarlığı güçlendirildi)
@@ -1958,7 +1972,7 @@ export default function CodenamesGame() {
 
                            return (
                                <div key={log.id} className="text-xs leading-relaxed relative pl-3 before:absolute before:left-0 before:top-1.5 before:w-1 before:h-1 before:rounded-full before:bg-white/20">
-                                  <span className={log.team === 'red' ? 'text-red-400 font-bold' : 'text-cyan-400 font-bold'}>{log.team === 'red' ? 'KRMZ' : 'MAVİ'}</span>{' '}
+                                  <span className={log.team === 'red' ? 'text-red-400 font-bold' : 'text-cyan-400 font-bold'}>{log.team === 'red' ? 'KRMIZI' : 'MAVİ'}</span>{' '}
                                   <span className="text-white/40 truncate max-w-[50px] inline-block align-bottom">{log.playerName}</span>{' '}
                                   
                                   {log.type === 'clue' ? (
