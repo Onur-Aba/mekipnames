@@ -38,6 +38,8 @@ export default function CodenamesGame() {
 
   // İPUCU ANİMASYONU İÇİN (Ortadan Sola Uçuş)
   const [clueBanner, setClueBanner] = useState<{word: string, count: number|string, team: string} | null>(null);
+  const [winnerBanner, setWinnerBanner] = useState<Team | null>(null);
+  const [assassinRevealCard, setAssassinRevealCard] = useState<any | null>(null);
 
   // YAZIYA GİZLİCE BAKMA (PEEKING) İÇİN LOKAL STATE
   const [peekedCards, setPeekedCards] = useState<Set<number>>(new Set());
@@ -170,7 +172,15 @@ export default function CodenamesGame() {
     }
     prevTurnRef.current = room?.currentTurn || null;
 
-  }, [room?.settings?.redName, room?.settings?.blueName, room?.currentTurn, view]);
+    if (room?.status === 'red_won') {
+        setWinnerBanner('red');
+        setTimeout(() => setWinnerBanner(null), 4200);
+    } else if (room?.status === 'blue_won') {
+        setWinnerBanner('blue');
+        setTimeout(() => setWinnerBanner(null), 4200);
+    }
+
+  }, [room?.settings?.redName, room?.settings?.blueName, room?.currentTurn, room?.status, view]);
 
   // YENİ İPUCU GELDİĞİNDE ANİMASYONU TETİKLEME VE TEMİZLEME (Titreme engellendi)
   useEffect(() => {
@@ -251,7 +261,15 @@ export default function CodenamesGame() {
      }
   }, [turnTimer, view, isDealingPhase]);
 
-  // 2. KICK WEBSOCKET BAĞLANTISI
+  
+     if (room?.status?.includes('_won')) {
+        socket?.emit('stopTimer', room.id);
+        if (tickAudioRef.current) {
+            tickAudioRef.current.pause();
+            tickAudioRef.current.currentTime = 0;
+        }
+     }
+// 2. KICK WEBSOCKET BAĞLANTISI
   useEffect(() => {
     if (!mePlayer?.isHost || !kickConfirmed || !introTarget || !kickChannelName) return;
 
@@ -704,7 +722,39 @@ export default function CodenamesGame() {
     const redCount = startTeam === 'red' ? 9 : 8;
     const blueCount = startTeam === 'blue' ? 9 : 8;
     
-    const colors = [...Array(redCount).fill('red'), ...Array(blueCount).fill('blue'), ...Array(7).fill('neutral'), 'assassin'].sort(() => 0.5 - Math.random());
+
+    const hasBadAdjacency = (gridColors: string[]) => {
+      const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+      for (let i = 0; i < 25; i++) {
+        const row = Math.floor(i / 5);
+        const col = i % 5;
+        const color = gridColors[i];
+        if (color !== 'red' && color !== 'blue') continue;
+
+        let sameNeighbors = 0;
+        for (const [dx, dy] of dirs) {
+          const nr = row + dx;
+          const nc = col + dy;
+          if (nr < 0 || nr >= 5 || nc < 0 || nc >= 5) continue;
+          const ni = nr * 5 + nc;
+          if (gridColors[ni] === color) sameNeighbors++;
+        }
+
+        if (sameNeighbors >= 3) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    let colors = [...Array(redCount).fill('red'), ...Array(blueCount).fill('blue'), ...Array(7).fill('neutral'), 'assassin'];
+
+    let shuffleAttempts = 0;
+    do {
+      colors = [...colors].sort(() => 0.5 - Math.random());
+      shuffleAttempts++;
+    } while (hasBadAdjacency(colors as string[]) && shuffleAttempts < 300);
+
 
     // İZİN VERİLEN KART TASARIMLARI (DOSYA İSİMLERİ)
     const allowedDesigns = {
@@ -768,11 +818,20 @@ export default function CodenamesGame() {
   // OYUN İÇİ FONKSİYONLARI VE LOG EKLENTİSİ
   const voteCard = (cardId: number) => {
     if (!room || room.turnPhase !== 'operative') return;
+
     const updatedCards = room.cards.map((c: any) => {
-      const newVotes = c.votes.filter((id: string) => id !== sessionId);
-      if (c.id === cardId) newVotes.push(sessionId);
-      return { ...c, votes: newVotes };
+      if (c.id !== cardId) return c;
+
+      const alreadyVoted = c.votes.includes(sessionId);
+
+      return {
+        ...c,
+        votes: alreadyVoted
+          ? c.votes.filter((id: string) => id !== sessionId)
+          : [...c.votes, sessionId]
+      };
     });
+
     broadcastSync({ ...room, cards: updatedCards });
   };
 
@@ -796,6 +855,8 @@ export default function CodenamesGame() {
     updatedRoom.guessesLeft--;
 
     if (card.color === 'assassin') {
+        setAssassinRevealCard(card);
+        setTimeout(() => setAssassinRevealCard(null), 2600);
         updatedRoom.status = updatedRoom.currentTurn === 'red' ? 'blue_won' : 'red_won';
     } else if (card.color !== updatedRoom.currentTurn) {
         // Hatalı renk seçimi: Sıra direkt karşıya geçer
@@ -824,7 +885,7 @@ export default function CodenamesGame() {
     
     const updatedRoom = {
       ...room,
-      currentClue: { word: clueWord.toUpperCase(), count: clueCount },
+      currentClue: { word: clueWord.toLocaleUpperCase('tr-TR'), count: clueCount },
       // Tahmin hakkı: Şefin verdiği tam sayı kadar (ekstra +1 yok)
       guessesLeft: clueCount === 'unlimited' ? 99 : (clueCount as number),
       turnPhase: 'operative' as const
@@ -1771,6 +1832,58 @@ export default function CodenamesGame() {
                         </motion.div>
                     )}
                 </AnimatePresence>
+
+           <AnimatePresence>
+             {winnerBanner && (
+               <motion.div
+                 initial={{ scale: 0.3, opacity: 0, y: 200 }}
+                 animate={{ scale: 1.15, opacity: 1, y: 0 }}
+                 exit={{ scale: 0.8, opacity: 0, y: 300 }}
+                 transition={{ duration: 1.1, ease: "easeInOut" }}
+                 className="fixed inset-0 pointer-events-none z-[190] flex items-end justify-center pb-10"
+               >
+                 <motion.div
+                   animate={{ y: [0, -220], scale: [1.15, 0.72] }}
+                   transition={{ delay: 2.2, duration: 1.4, ease: "easeInOut" }}
+                   className={`px-14 py-8 rounded-3xl border-4 shadow-2xl backdrop-blur-xl ${winnerBanner === 'red' ? 'bg-red-900/90 border-red-400' : 'bg-cyan-900/90 border-cyan-300'}`}
+                 >
+                   <div className="flex items-center gap-5">
+                     <Crown size={64} className={winnerBanner === 'red' ? 'text-red-300' : 'text-cyan-200'} />
+                     <div>
+                       <div className="text-white/70 font-black tracking-[0.4em] text-sm">OYUN BİTTİ</div>
+                       <div className="text-5xl font-black text-white">
+                         {winnerBanner === 'red' ? localRedName : localBlueName} KAZANDI
+                       </div>
+                     </div>
+                   </div>
+                 </motion.div>
+               </motion.div>
+             )}
+           </AnimatePresence>
+
+           <AnimatePresence>
+             {assassinRevealCard && (
+               <motion.div
+                 initial={{ opacity: 0 }}
+                 animate={{ opacity: 1 }}
+                 exit={{ opacity: 0 }}
+                 className="fixed inset-0 z-[220] flex items-center justify-center pointer-events-none"
+               >
+                 <motion.div
+                   initial={{ scale: 0.2, rotate: -12 }}
+                   animate={{ scale: [0.2, 1.4, 1], rotate: [0, 4, 0] }}
+                   exit={{ scale: 0.3, opacity: 0 }}
+                   transition={{ duration: 2.3, ease: "easeInOut" }}
+                   className="bg-black border-[6px] border-yellow-400 rounded-[40px] p-12 shadow-[0_0_80px_rgba(250,204,21,0.45)]"
+                 >
+                   <div className="text-center">
+                     <div className="text-yellow-400 text-sm font-black tracking-[0.6em] mb-4">SUİKASTÇİ</div>
+                     <div className="text-7xl font-black text-white tracking-widest">{assassinRevealCard.word}</div>
+                   </div>
+                 </motion.div>
+               </motion.div>
+             )}
+           </AnimatePresence>
             </aside>
 
             {/* ORTA OYUN IZGARASI VE INPUT */}
