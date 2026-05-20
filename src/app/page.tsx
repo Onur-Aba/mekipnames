@@ -127,18 +127,42 @@ export default function CodenamesGame() {
       localStorage.setItem('codenames_active_tab', myTabId.current);
       
       const handleStorage = (e: StorageEvent) => {
-          if (e.key === 'codenames_active_tab' && e.newValue !== myTabId.current) {
+          if (e.key !== 'codenames_active_tab') return;
+
+          if (e.newValue && e.newValue !== myTabId.current) {
+              setSessionConflict(true);
+          } else if (e.newValue === myTabId.current) {
+              setSessionConflict(false);
+          }
+      };
+
+      const handleFocus = () => {
+          const activeTab = localStorage.getItem('codenames_active_tab');
+          if (activeTab && activeTab !== myTabId.current) {
               setSessionConflict(true);
           }
       };
       
       window.addEventListener('storage', handleStorage);
-      return () => window.removeEventListener('storage', handleStorage);
+      window.addEventListener('focus', handleFocus);
+      return () => {
+          window.removeEventListener('storage', handleStorage);
+          window.removeEventListener('focus', handleFocus);
+      };
   }, []);
 
   const resolveConflict = () => {
       localStorage.setItem('codenames_active_tab', myTabId.current);
       setSessionConflict(false);
+
+      if (socket && !socket.connected) {
+          socket.connect();
+      }
+
+      const currentRoom = roomRef.current;
+      if (currentRoom?.id) {
+          socket?.emit('joinRoom', currentRoom.id);
+      }
   };
 
   // SOCKET.IO BAĞLANTISI BAŞLATMA
@@ -194,6 +218,28 @@ export default function CodenamesGame() {
     } catch (e) {
       console.error("Odalar çekilemedi:", e);
     }
+  };
+
+  const getRoomAfterPlayerLeaves = (currentRoom: any, leavingSessionId: string) => {
+    if (!currentRoom?.players) return currentRoom;
+
+    const leavingPlayer = currentRoom.players.find((p: any) => p.sessionId === leavingSessionId);
+    const remainingPlayers = currentRoom.players.filter((p: any) => p.sessionId !== leavingSessionId);
+
+    if (remainingPlayers.length === 0) {
+      return { ...currentRoom, players: [], status: 'deleted' };
+    }
+
+    if (leavingPlayer?.isHost || !remainingPlayers.some((p: any) => p.isHost)) {
+      const reassignedPlayers = remainingPlayers.map((p: any, index: number) => ({
+        ...p,
+        isHost: index === 0
+      }));
+
+      return { ...currentRoom, players: reassignedPlayers };
+    }
+
+    return { ...currentRoom, players: remainingPlayers };
   };
 
   useEffect(() => {
@@ -306,47 +352,145 @@ export default function CodenamesGame() {
 
   // 2. KICK WEBSOCKET BAĞLANTISI
   useEffect(() => {
-    if (!mePlayer?.isHost || !kickConfirmed || !introTarget || !kickChannelName) return;
+    if (!mePlayer?.isHost || !kickEnabled || !kickConfirmed || !introTarget || !kickChannelName.trim()) return;
 
-    let ws: WebSocket;
+    let ws: WebSocket | null = null;
+    let cancelled = false;
+    const controllers = new Set<AbortController>();
+
+    const normalizeKickChannelName = (value: string) => {
+      return value
+        .trim()
+        .replace(/^@/, '')
+        .replace(/^https?:\/\/(www\.)?kick\.com\//i, '')
+        .split(/[/?#]/)[0]
+        .trim();
+    };
+
+    const fetchJsonWithTimeout = async (url: string) => {
+      const controller = new AbortController();
+      controllers.add(controller);
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
+
+      try {
+        const res = await fetch(url, { cache: 'no-store', signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const text = await res.text();
+        if (!text) throw new Error('Boş Kick cevabı');
+
+        return JSON.parse(text);
+      } finally {
+        window.clearTimeout(timeout);
+        controllers.delete(controller);
+      }
+    };
+
+    const getChatroomId = async (channelName: string) => {
+      const safeChannelName = normalizeKickChannelName(channelName);
+      if (!safeChannelName) return null;
+
+      const kickUrls = [
+        `https://kick.com/api/v2/channels/${encodeURIComponent(safeChannelName)}/chatroom`,
+        `https://kick.com/api/v2/channels/${encodeURIComponent(safeChannelName)}`
+      ];
+
+      const makeProxyUrls = (url: string) => [
+        url,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
+      ];
+
+      for (const kickUrl of kickUrls) {
+        for (const requestUrl of makeProxyUrls(kickUrl)) {
+          if (cancelled) return null;
+
+          try {
+            const data = await fetchJsonWithTimeout(requestUrl);
+            const chatroomId = data?.id || data?.chatroom?.id || data?.chatroom_id;
+            if (chatroomId) return String(chatroomId);
+          } catch (err) {
+            if (cancelled) return null;
+          }
+        }
+      }
+
+      return null;
+    };
+
     const connectToKick = async () => {
       try {
-        const targetUrl = encodeURIComponent(`https://kick.com/api/v2/channels/${kickChannelName}`);
-        const proxyUrl = `https://corsproxy.io/?${targetUrl}`;
-
-        const proxyRes = await fetch(proxyUrl);
-        if (!proxyRes.ok) return;
-
-        const data = await proxyRes.json();
-        if (!data?.chatroom?.id) return;
+        const chatroomId = await getChatroomId(kickChannelName);
+        if (cancelled || !chatroomId) return;
 
         ws = new WebSocket('wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=7.6.0&flash=false');
-        ws.onopen = () => ws.send(JSON.stringify({ event: "pusher:subscribe", data: { auth: "", channel: `chatrooms.${data.chatroom.id}.v2` } }));
+
+        ws.onopen = () => {
+          if (!ws || cancelled) return;
+          ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { auth: '', channel: `chatrooms.${chatroomId}.v2` } }));
+        };
+
         ws.onmessage = (e) => {
-          const wsData = JSON.parse(e.data);
-          if (wsData.event === 'App\\Events\\ChatMessageEvent') {
-            const chat = JSON.parse(wsData.data);
-            const msg = chat.content.trim();
-            const user = chat.sender.username;
-            if (msg === '1' || msg === '0') {
+          if (cancelled) return;
+
+          try {
+            const wsData = JSON.parse(e.data);
+
+            if (wsData.event === 'pusher:ping' && ws) {
+              ws.send(JSON.stringify({ event: 'pusher:pong', data: {} }));
+              return;
+            }
+
+            if (!String(wsData.event || '').includes('ChatMessageEvent')) return;
+
+            const chat = typeof wsData.data === 'string' ? JSON.parse(wsData.data) : wsData.data;
+            const msg = String(chat?.content ?? '').trim();
+            const user = String(chat?.sender?.username || chat?.sender?.slug || chat?.sender?.id || '').trim();
+
+            if ((msg === '1' || msg === '0') && user) {
               setKickVotes(prev => {
                 if (prev.voters.has(user)) return prev;
+
+                const voters = new Set(prev.voters);
+                voters.add(user);
+
                 const updated = {
                   likes: msg === '1' ? prev.likes + 1 : prev.likes,
                   dislikes: msg === '0' ? prev.dislikes + 1 : prev.dislikes,
-                  voters: new Set(prev.voters).add(user)
+                  voters
                 };
-                socket?.emit('kickUpdate', { roomId: room?.id, payload: { likes: updated.likes, dislikes: updated.dislikes } });
+
+                socket?.emit('kickUpdate', {
+                  roomId: roomRef.current?.id,
+                  payload: { likes: updated.likes, dislikes: updated.dislikes }
+                });
+
                 return updated;
               });
             }
+          } catch (err) {
+            console.warn('Kick mesajı okunamadı:', err);
           }
         };
-      } catch (err) { console.error("Kick Error:", err); }
+
+        ws.onerror = () => {
+          if (!cancelled) console.warn('Kick websocket bağlantısı hata verdi.');
+        };
+      } catch (err) {
+        if (!cancelled) console.warn('Kick bağlantısı kurulamadı:', err);
+      }
     };
+
     connectToKick();
-    return () => { if (ws) ws.close(); };
-  }, [introTarget, kickConfirmed, kickChannelName, mePlayer, socket, room?.id]);
+
+    return () => {
+      cancelled = true;
+      controllers.forEach(controller => controller.abort());
+      controllers.clear();
+      if (ws) ws.close();
+    };
+  }, [introTarget, kickEnabled, kickConfirmed, kickChannelName, mePlayer?.isHost, socket]);
 
   // 3. SOCKET.IO SİSTEMİ (Odaya Katılma ve Senkronizasyon)
   useEffect(() => {
@@ -474,7 +618,12 @@ export default function CodenamesGame() {
     };
 
     const handleKickUpdate = (payload: any) => {
-        setKickVotes(prev => ({ ...prev, likes: payload.likes, dislikes: payload.dislikes }));
+        const data = payload?.payload || payload;
+        setKickVotes(prev => ({
+            ...prev,
+            likes: Number(data?.likes) || 0,
+            dislikes: Number(data?.dislikes) || 0
+        }));
     };
 
     const handleEndIntro = () => {
@@ -520,15 +669,13 @@ export default function CodenamesGame() {
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       const currentRoom = roomRef.current;
-      const me = currentRoom?.players?.find((p: any) => p.sessionId === sessionId);
-      
       if (currentRoom) {
-          if (me?.isHost) {
-              socket?.emit('sync', { roomId: currentRoom.id, room: { ...currentRoom, status: 'deleted' } });
+          const updatedRoom = getRoomAfterPlayerLeaves(currentRoom, sessionId);
+          socket?.emit('sync', { roomId: currentRoom.id, room: updatedRoom });
+
+          if (updatedRoom.status === 'deleted') {
+              socket?.emit('stopTimer', currentRoom.id);
               fetch(`${BACKEND_URL}/api/rooms/${currentRoom.id}`, { method: 'DELETE', keepalive: true }).catch(()=>{});
-          } else {
-              const updatedPlayers = currentRoom.players.filter((p: any) => p.sessionId !== sessionId);
-              socket?.emit('sync', { roomId: currentRoom.id, room: { ...currentRoom, players: updatedPlayers } });
           }
       }
     };
@@ -647,15 +794,25 @@ export default function CodenamesGame() {
     }
   };
 
-  const startMeetingIntro = (target: Player) => {
-    if (!mePlayer?.isHost) return;
-    if (meetingResults[target.sessionId]) return; 
+  const getNextIntroTarget = (scores: Record<string, any> = meetingResults) => {
+    if (!room?.players) return null;
+    return room.players.find((p: any) => (p.team === 'red' || p.team === 'blue') && !scores[p.sessionId]) || null;
+  };
 
+  const triggerMeetingIntro = (target: Player) => {
+    if (!target || !room?.id) return;
     socket?.emit('startIntro', { roomId: room.id, target });
     setIntroTarget(target);
     setLobbyVotes({});
     setKickVotes({ likes: 0, dislikes: 0, voters: new Set() });
     setIntroTimer(10);
+  };
+
+  const startMeetingIntro = (target: Player) => {
+    if (!mePlayer?.isHost) return;
+    if (meetingResults[target.sessionId]) return; 
+
+    triggerMeetingIntro(target);
   };
 
   const endMeetingIntro = () => {
@@ -709,9 +866,13 @@ export default function CodenamesGame() {
   };
 
   const handleStartOperation = () => {
-    if (room.settings.introMode && !room.introCompleted) {
+    if (room.settings.introMode) {
+      const resetScores = room.introCompleted ? {} : (room.meetingScores || meetingResults || {});
+      const updatedRoom = { ...room, introCompleted: false, meetingScores: resetScores, isMeetingActive: true };
+
+      setMeetingScores(resetScores);
       setMeetingView(true);
-      broadcastSync({ ...room, isMeetingActive: true }); 
+      broadcastSync(updatedRoom); 
     } else {
       startGame();
     }
@@ -930,8 +1091,9 @@ export default function CodenamesGame() {
     updatedRoom.guessesLeft--;
 
     if (card.color === 'assassin') {
-        // Suikastçi açılınca oyun biter statüsüne geçilir
-        // Not: Animasyon kısmı handleSync içerisine devredildi (Herkes aynı anda görsün diye)
+        // Suikastçi açılınca oyunu bitiren oyuncunun ekranında da animasyonu anında tetikle
+        setAssassinRevealCard(card);
+        setTimeout(() => setAssassinRevealCard(null), 2600);
         updatedRoom.status = updatedRoom.currentTurn === 'red' ? 'blue_won' : 'red_won';
     } else if (card.color !== updatedRoom.currentTurn) {
         // Hatalı renk seçimi: Sıra direkt karşıya geçer
@@ -996,6 +1158,12 @@ export default function CodenamesGame() {
     setClueWord('');
     setClueCount(1);
     setIsDealingPhase(false);
+    setMeetingScores({});
+    setMeetingView(false);
+    setIntroTarget(null);
+    setIntroTimer(0);
+    setLobbyVotes({});
+    setKickVotes({ likes: 0, dislikes: 0, voters: new Set() });
     
     // BİR SONRAKİ ELİN BAŞLAMA SIRASINI DEĞİŞTİRİYORUZ
     const nextStart = room.settings?.lastStartingTeam === 'red' ? 'blue' : 'red';
@@ -1009,6 +1177,9 @@ export default function CodenamesGame() {
         currentClue: null,
         guessesLeft: 0,
         gameLogs: [],
+        meetingScores: {},
+        introCompleted: false,
+        isMeetingActive: false,
         cards: [] // Kartları temizle ki tekrar başlatırken yenileri gelsin
     };
     broadcastSync(updatedRoom);
@@ -1028,15 +1199,14 @@ export default function CodenamesGame() {
         tickAudioRef.current.currentTime = 0;
     }
 
-    if (mePlayer?.isHost) {
-        const deletedRoom = { ...room, status: 'deleted' };
-        socket?.emit('sync', { roomId: room.id, room: deletedRoom });
+    const updatedRoom = getRoomAfterPlayerLeaves(room, sessionId);
+
+    if (updatedRoom.status === 'deleted') {
+        socket?.emit('sync', { roomId: room.id, room: updatedRoom });
         try {
             await fetch(`${BACKEND_URL}/api/rooms/${room.id}`, { method: 'DELETE' });
         } catch (e) {}
     } else {
-        const updatedPlayers = room.players.filter((p: any) => p.sessionId !== sessionId);
-        const updatedRoom = { ...room, players: updatedPlayers };
         broadcastSync(updatedRoom);
     }
 
@@ -1495,8 +1665,8 @@ export default function CodenamesGame() {
                           </div>
 
                           {/* MAVİ TAKIM KARTI */}
-                          <div className="bg-cyan-950/30 backdrop-blur-xl border border-cyan-500/30 rounded-[24px] p-6 h-fit shadow-xl relative overflow-hidden group">
-                             <div className="absolute -right-20 -top-20 h-40 w-40 rounded-full bg-cyan-500/10 blur-3xl transition group-hover:bg-cyan-500/20"></div>
+                          <div className="bg-blue-950/70 backdrop-blur-xl border-2 border-blue-400/60 rounded-[24px] p-6 h-fit shadow-[0_0_30px_rgba(37,99,235,0.28)] relative overflow-hidden group">
+                             <div className="absolute -right-20 -top-20 h-40 w-40 rounded-full bg-blue-500/25 blur-3xl transition group-hover:bg-blue-500/35"></div>
                              <div className="flex justify-between items-center mb-6 relative z-10">
                                 <div className="flex items-center gap-3 w-full">
                                    <div className="w-4 h-4 rounded-full bg-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.8)] shrink-0"></div>
@@ -1626,7 +1796,9 @@ export default function CodenamesGame() {
                                        alert("Tanıtım modunu açmak için Kick entegrasyonu açık, kanal adı yazılı ve onaylanmış olmalıdır!");
                                        return;
                                     }
-                                    broadcastSync({...room, settings: {...room.settings, introMode: !room.settings.introMode}});
+                                    const nextIntroMode = !room.settings.introMode;
+                                    if (nextIntroMode) setMeetingScores({});
+                                    broadcastSync({...room, settings: {...room.settings, introMode: nextIntroMode}, meetingScores: nextIntroMode ? {} : (room.meetingScores || {}), introCompleted: false, isMeetingActive: false});
                                   }} className={`w-12 h-6 rounded-full relative transition-colors border ${room.settings?.introMode ? 'bg-cyan-500 border-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.4)]' : 'bg-black/50 border-white/10'}`}>
                                   <div className={`absolute top-[3px] w-4 h-4 bg-white rounded-full transition-all ${room.settings?.introMode ? 'left-[26px]' : 'left-[3px]'}`}/>
                                </button>
@@ -1656,7 +1828,8 @@ export default function CodenamesGame() {
                                <button disabled={!mePlayer?.isHost} onClick={() => {
                                     const newState = !kickEnabled;
                                     setKickEnabled(newState);
-                                    if (!newState && room.settings.introMode) broadcastSync({...room, settings: {...room.settings, introMode: false}});
+                                    if (!newState) setKickConfirmed(false);
+                                    if (!newState && room.settings.introMode) broadcastSync({...room, settings: {...room.settings, introMode: false}, introCompleted: false, isMeetingActive: false});
                                   }} className={`w-12 h-6 rounded-full relative transition-colors border ${kickEnabled ? 'bg-red-500 border-red-400 shadow-[0_0_10px_rgba(239,68,68,0.4)]' : 'bg-black/50 border-white/10'}`}>
                                   <div className={`absolute top-[3px] w-4 h-4 bg-white rounded-full transition-all ${kickEnabled ? 'left-[26px]' : 'left-[3px]'}`}/>
                                </button>
@@ -1665,7 +1838,17 @@ export default function CodenamesGame() {
                                <input value={kickChannelName} onChange={(e) => setKickChannelName(e.target.value)} disabled={kickConfirmed || !mePlayer?.isHost} className="flex-1 bg-black/40 border border-white/10 p-3 rounded-xl text-sm text-white outline-none focus:border-red-400 transition-colors" placeholder="Kanal adı" />
                                {mePlayer?.isHost && kickEnabled && (
                                   !kickConfirmed ? 
-                                    <button onClick={() => setKickConfirmed(true)} className="bg-white/10 hover:bg-red-500 p-3 rounded-xl text-white transition-colors"><CheckCircle2 size={18}/></button> :
+                                    <button onClick={() => {
+                                      const safeChannelName = kickChannelName
+                                        .trim()
+                                        .replace(/^@/, '')
+                                        .replace(/^https?:\/\/(www\.)?kick\.com\//i, '')
+                                        .split(/[/?#]/)[0]
+                                        .trim();
+                                      if (!safeChannelName) return alert("Kick kanal adı girilmelidir.");
+                                      setKickChannelName(safeChannelName);
+                                      setKickConfirmed(true);
+                                    }} className="bg-white/10 hover:bg-red-500 p-3 rounded-xl text-white transition-colors"><CheckCircle2 size={18}/></button> :
                                     <button onClick={() => setKickConfirmed(false)} className="bg-red-500/20 text-red-400 p-3 rounded-xl transition-colors border border-red-500/30"><X size={18}/></button>
                                )}
                             </div>
@@ -2007,28 +2190,29 @@ export default function CodenamesGame() {
                       const getCardStyle = () => {
                         if (isActuallyRevealed) {
                             let baseOuter = "";
+                            let peekPill = "";
                             let peekText = "";
-                            if (card.color === 'red') { baseOuter = "bg-red-500 border border-red-400"; peekText = "text-red-50 drop-shadow-sm"; }
-                            else if (card.color === 'blue') { baseOuter = "bg-cyan-600 border border-cyan-500"; peekText = "text-cyan-100 drop-shadow-sm"; }
-                            else if (card.color === 'neutral') { baseOuter = "bg-white/90 border border-white/80"; peekText = "text-black"; }
-                            else { baseOuter = "bg-zinc-900 border border-zinc-500"; peekText = "text-white"; }
+                            if (card.color === 'red') { baseOuter = "bg-[#651d20] border border-[#9f4a4a]"; peekPill = "bg-[#2a1111] border border-[#b86b62]"; peekText = "text-[#ffe8df] drop-shadow-sm"; }
+                            else if (card.color === 'blue') { baseOuter = "bg-[#1f4c65] border border-[#5f8fa4]"; peekPill = "bg-[#102333] border border-[#78aabc]"; peekText = "text-[#e5f8ff] drop-shadow-sm"; }
+                            else if (card.color === 'neutral') { baseOuter = "bg-[#cfc5ad] border border-[#a99d80]"; peekPill = "bg-[#ddd2b9] border border-[#9f9274]"; peekText = "text-[#332d22]"; }
+                            else { baseOuter = "bg-zinc-900 border border-zinc-500"; peekPill = "bg-black/90 border border-white/20"; peekText = "text-white"; }
                             
                             return { 
                                 outer: baseOuter, 
-                                pill: isPeeked ? "bg-black/90 border border-white/20" : "hidden", 
+                                pill: isPeeked ? peekPill : "hidden", 
                                 text: isPeeked ? peekText : "hidden" 
                             };
                         }
 
                         if (showColor) {
-                            if (card.color === 'red') return { outer: "bg-red-500 border-2 border-red-400", pill: "bg-black/85 border border-white/25", text: "text-red-50 drop-shadow-sm" };
-                            if (card.color === 'blue') return { outer: "bg-cyan-600 border-2 border-cyan-500", pill: "bg-black/85 border border-white/25", text: "text-cyan-100 drop-shadow-sm" };
-                            if (card.color === 'neutral') return { outer: "bg-white/80 border-2 border-white/60 backdrop-blur-md", pill: "bg-black/85 border border-white/25", text: "text-white" };
-                            return { outer: "bg-zinc-900 border-2 border-zinc-700", pill: "bg-red-900/95 border border-red-500/90", text: "text-white" };
+                            if (card.color === 'red') return { outer: "bg-[#651d20] border-2 border-[#9f4a4a] shadow-[0_0_26px_rgba(101,29,32,0.28)]", pill: "bg-[#2a1111] border border-[#b86b62]", text: "text-[#ffe8df] drop-shadow-sm" };
+                            if (card.color === 'blue') return { outer: "bg-[#1f4c65] border-2 border-[#5f8fa4] shadow-[0_0_30px_rgba(31,76,101,0.32)]", pill: "bg-[#102333] border border-[#78aabc]", text: "text-[#e5f8ff] drop-shadow-sm" };
+                            if (card.color === 'neutral') return { outer: "bg-[#cfc5ad] border-2 border-[#a99d80] shadow-[0_0_22px_rgba(207,197,173,0.20)] backdrop-blur-md", pill: "bg-[#ddd2b9] border border-[#9f9274]", text: "text-[#332d22] drop-shadow-sm" };
+                            return { outer: "bg-[#07070b] border-2 border-red-500/80 shadow-[0_0_28px_rgba(239,68,68,0.24)]", pill: "bg-red-950/95 border border-red-400/80", text: "text-white drop-shadow-sm" };
                         }
 
-                        // OYUN İÇİNDE AJANLARIN GÖRDÜĞÜ KAPALI KARTLAR (DAHA KOYU/OPAK TONA ÇEKİLDİ)
-                        return { outer: "bg-[#544175] border-2 border-white/50 shadow-[0_6px_0_rgba(255,255,255,0.2)]", pill: "bg-black/40 text-white border border-white/40", text: "text-white font-black drop-shadow-md" };
+                        // OYUN İÇİNDE AJANLARIN GÖRDÜĞÜ KAPALI KARTLAR (KREM VE TAM OPAK)
+                        return { outer: "bg-[#cfc5ad] border-2 border-[#a99d80] shadow-[0_6px_0_rgba(92,80,56,0.42),0_0_18px_rgba(207,197,173,0.16)]", pill: "bg-[#ddd2b9] text-[#2f2a20] border border-[#9f9274]", text: "text-[#332d22] font-black drop-shadow-sm" };
                       };
                       
                       const style = getCardStyle();
@@ -2102,7 +2286,7 @@ export default function CodenamesGame() {
                               className={`absolute inset-0 rounded-xl flex items-center justify-center cursor-pointer select-none transition-all duration-200 overflow-hidden group p-2 ${style.outer} ${isActuallyRevealed ? 'shadow-none' : ''}`}
                             >
                               {!isActuallyRevealed && (
-                                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.02] z-0">
+                                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.045] z-0">
                                     <span className="font-black text-2xl md:text-3xl lg:text-4xl tracking-[0.3em] text-white uppercase select-none drop-shadow-md">MEKIP</span>
                                  </div>
                               )}
@@ -2213,7 +2397,7 @@ export default function CodenamesGame() {
                 {/* SAĞ PANEL (MAVİ TAKIM VE LOG) */}
                 <aside className="w-72 flex flex-col gap-4 shrink-0 hidden md:flex h-full min-h-0">
                     {/* TAKIM KARTI (MAVİ) Daha Koyu Arkaplan ile */}
-                    <div className="bg-[#00141a] rounded-2xl p-4 flex flex-col items-center border-2 border-cyan-500/60 shadow-[0_0_30px_rgba(34,211,238,0.15)] relative overflow-hidden text-center min-h-[340px] shrink-0">
+                    <div className="bg-[#003a66] rounded-2xl p-4 flex flex-col items-center border-2 border-blue-400/80 shadow-[0_0_38px_rgba(37,99,235,0.34)] relative overflow-hidden text-center min-h-[340px] shrink-0">
                         <h2 className="text-xl font-black text-cyan-100 mb-2 relative z-10 uppercase tracking-wide drop-shadow-sm">{room.settings?.blueName || 'MAVİ TAKIM'}</h2>
                         {/* KALAN KART SAYISI (BEYAZ RENK) */}
                         <div className="text-8xl font-black text-white mb-1 relative z-10 leading-none drop-shadow-[0_0_15px_rgba(255,255,255,0.5)]">{blueLeft}</div>
