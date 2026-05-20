@@ -236,7 +236,19 @@ export default function CodenamesGame() {
         isHost: index === 0
       }));
 
-      return { ...currentRoom, players: reassignedPlayers };
+      const stillHasHost = reassignedPlayers.some((p: any) => p.isHost);
+
+        if (!stillHasHost && reassignedPlayers.length > 0) {
+            reassignedPlayers[0] = {
+                ...reassignedPlayers[0],
+                isHost: true
+            };
+        }
+
+        return {
+            ...currentRoom,
+            players: reassignedPlayers
+        };
     }
 
     return { ...currentRoom, players: remainingPlayers };
@@ -557,6 +569,14 @@ export default function CodenamesGame() {
             setClueBanner({ word: newClue.word, count: newClue.count, team: syncRoom.currentTurn });
         }
 
+        // yeni host'u anında algıla
+        const updatedMe = syncRoom.players?.find(
+          (p: any) => p.sessionId === sessionId
+        );
+
+        if (updatedMe) {
+          setHostPresent(updatedMe.isHost);
+        }
         setRoom(syncRoom);
         if (syncRoom.meetingScores) setMeetingScores(syncRoom.meetingScores);
         
@@ -996,10 +1016,10 @@ export default function CodenamesGame() {
 
     // İZİN VERİLEN KART TASARIMLARI (DOSYA İSİMLERİ)
     const allowedDesigns = {
-      assassin: [1, 3],
-      blue: [1, 2, 3, 4],
-      red: [1, 2, 3, 4],
-      neutral: [1, 3, 4]
+      assassin: [1],
+      blue: [1, 2, 3, 4, 5],
+      red: [1, 2, 3, 4, 5],
+      neutral: [1, 2, 3, 4, 5]
     };
 
     const cards: Card[] = selectedWords.map((word, i) => {
@@ -1083,7 +1103,7 @@ export default function CodenamesGame() {
 
     const updatedCards = updatedRoom.cards.map((c: any) => {
       if (c.id === cardId) return { ...c, revealed: true, votes: [] };
-      return { ...c, votes: [] }; 
+      return { ...c}; 
     });
     updatedRoom.cards = updatedCards;
     
@@ -1140,7 +1160,12 @@ export default function CodenamesGame() {
   };
 
   const returnToLobby = () => {
-    if (!room || !mePlayer?.isHost) return;
+    if (!room) return;
+
+    const latestMe = room.players?.find((p: any) => p.sessionId === sessionId);
+
+    // host değişmişse yeni host anında butonu görsün
+    if (!latestMe?.isHost) return;
     
     // OYUN İÇİ STATELERİ SIFIRLA
     socket?.emit('stopTimer', room.id);
@@ -1233,6 +1258,17 @@ export default function CodenamesGame() {
     setRoom(null);
     setShowLeaveConfirm(false);
     setPendingRoomId(null);
+    // SOCKET ODAYI TAM TERK ETSİN
+    socket?.emit('leaveRoom', {
+        roomId: room.id,
+        sessionId
+    });
+
+    // eski sync cache temizliği
+    setHostPresent(true);
+
+    // stale sync engeli
+    roomRef.current = null;
   };
 
   // --- RENDER BİLEŞENLERİ ---
