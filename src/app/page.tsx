@@ -25,6 +25,93 @@ const GlobalStyles = () => (
       background: linear-gradient(to bottom, rgba(0,0,0,0) 50%, rgba(0,0,0,0.3) 50%);
       background-size: 100% 16px;
     }
+
+    /* Yeni blur'lü arka plan katmanı */
+    .bg-image-overlay {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(
+          to bottom,
+          rgba(0,0,0,0.72),
+          rgba(8,8,12,0.78)
+        ),
+        url('/bg.png');
+
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+
+      filter: blur(5px);
+      transform: scale(1.06);
+
+      opacity: 55;
+
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .garage-card-perspective {
+      perspective: 800px;
+      perspective-origin: 50% 50%;
+      transform-style: preserve-3d;
+    }
+
+    .garage-card-door {
+      transform-origin: top center;
+      transform-style: preserve-3d;
+      backface-visibility: hidden;
+    }
+
+    .safe-wrap {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .bottom-clue-word-scroll {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.45) transparent;
+}
+
+.bottom-clue-word-scroll::-webkit-scrollbar {
+  height: 6px;
+}
+
+.bottom-clue-word-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.bottom-clue-word-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.45);
+  border-radius: 999px;
+}
+    
+    .card-word-pill-scroll {
+      max-width: 100%;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.45) transparent;
+    }
+
+    .card-word-pill-scroll::-webkit-scrollbar {
+      height: 5px;
+    }
+
+    .card-word-pill-scroll::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .card-word-pill-scroll::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.38);
+      border-radius: 999px;
+    }
   `}} />
 );
 
@@ -348,6 +435,7 @@ export default function CodenamesGame() {
              updatedRoom.turnPhase = 'spymaster';
              updatedRoom.currentTurn = updatedRoom.currentTurn === 'red' ? 'blue' : 'red';
              updatedRoom.currentClue = null;
+             updatedRoom.cards = clearAllCardVotes(updatedRoom.cards || []);
              
              broadcastSync(updatedRoom);
          }
@@ -857,6 +945,10 @@ export default function CodenamesGame() {
     socket?.emit('lobbyVote', { roomId: room.id, payload: { voterId: sessionId, vote } });
   };
 
+  function clearAllCardVotes(cards: any[] = []) {
+    return cards.map((c: any) => ({ ...c, votes: [] }));
+  }
+
   const switchRole = (team: Team, role: Role) => {
     const updated = room.players.map((p: any) => p.sessionId === sessionId ? { ...p, team, role } : p);
     broadcastSync({ ...room, players: updated });
@@ -1067,6 +1159,7 @@ export default function CodenamesGame() {
       updatedRoom.turnPhase = 'spymaster';
       updatedRoom.currentTurn = updatedRoom.currentTurn === 'red' ? 'blue' : 'red';
       updatedRoom.currentClue = null;
+      updatedRoom.cards = clearAllCardVotes(updatedRoom.cards || []);
       
       broadcastSync(updatedRoom);
   };
@@ -1097,18 +1190,21 @@ export default function CodenamesGame() {
     if (!card || card.revealed) return;
 
     let updatedRoom = { ...room };
+    const previousTurn = updatedRoom.currentTurn;
     
     const log = { id: Date.now(), type: 'reveal', team: updatedRoom.currentTurn, playerName: mePlayer?.name || 'Ajan', word: card.word, color: card.color, relatedClue: updatedRoom.currentClue?.word };
     updatedRoom.gameLogs = [...(updatedRoom.gameLogs || []), log];
 
     const updatedCards = updatedRoom.cards.map((c: any) => {
-      if (c.id === cardId) return { ...c, revealed: true, votes: [] };
+      if (c.id === cardId) return { ...c, revealed: true };
       return { ...c}; 
     });
     updatedRoom.cards = updatedCards;
     
     // TAHMİN HAKKI KONTROLÜ VE AZALTILMASI
-    updatedRoom.guessesLeft--;
+    const rawGuessesLeft = Number(updatedRoom.guessesLeft ?? updatedRoom.currentClue?.count ?? 1);
+    const currentGuessesLeft = Number.isFinite(rawGuessesLeft) ? rawGuessesLeft : 1;
+    updatedRoom.guessesLeft = Math.max(0, currentGuessesLeft - 1);
 
     if (card.color === 'assassin') {
         // Suikastçi açılınca oyunu bitiren oyuncunun ekranında da animasyonu anında tetikle
@@ -1129,6 +1225,10 @@ export default function CodenamesGame() {
         }
     }
 
+    if (previousTurn !== updatedRoom.currentTurn) {
+        updatedRoom.cards = clearAllCardVotes(updatedRoom.cards || []);
+    }
+
     const redLeft = updatedRoom.cards.filter((c: any) => c.color === 'red' && !c.revealed).length;
     const blueLeft = updatedRoom.cards.filter((c: any) => c.color === 'blue' && !c.revealed).length;
     if (redLeft === 0) updatedRoom.status = 'red_won';
@@ -1139,16 +1239,18 @@ export default function CodenamesGame() {
 
   const submitClue = () => {
     if (!clueWord.trim() || !room) return;
+
+    const normalizedClueCount = clueCount === 'unlimited' ? 'unlimited' : Math.max(1, Number(clueCount) || 1);
     
     const updatedRoom = {
       ...room,
-      currentClue: { word: clueWord.toLocaleUpperCase('tr-TR'), count: clueCount },
+      currentClue: { word: clueWord.toLocaleUpperCase('tr-TR'), count: normalizedClueCount },
       // Tahmin hakkı: Şefin verdiği tam sayı kadar (ekstra +1 yok)
-      guessesLeft: clueCount === 'unlimited' ? 99 : (clueCount as number),
+      guessesLeft: normalizedClueCount === 'unlimited' ? 99 : normalizedClueCount,
       turnPhase: 'operative' as const
     };
 
-    const log = { id: Date.now(), type: 'clue', team: updatedRoom.currentTurn, playerName: mePlayer?.name || 'Şef', word: clueWord.toUpperCase(), count: clueCount };
+    const log = { id: Date.now(), type: 'clue', team: updatedRoom.currentTurn, playerName: mePlayer?.name || 'Şef', word: clueWord.toUpperCase(), count: normalizedClueCount };
     updatedRoom.gameLogs = [...(updatedRoom.gameLogs || []), log];
 
     // ŞEFİN EKRANINDA ANINDA GÖSTER (Göz kırpmayı önler, doğrudan tetikler)
@@ -1312,7 +1414,7 @@ export default function CodenamesGame() {
               <span className="bg-gradient-to-r from-cyan-300 via-violet-300 to-fuchsia-300 bg-clip-text text-transparent">AJAN GİRİŞİ</span>
             </h1>
             
-            <input autoFocus value={playerName} onChange={e => setPlayerName(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-xl mb-4 text-white focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400/50 outline-none transition-all placeholder:text-white/30" placeholder="Kod Adınız..." />
+            <input suppressHydrationWarning autoFocus value={playerName} onChange={e => setPlayerName(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-xl mb-4 text-white focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400/50 outline-none transition-all placeholder:text-white/30" placeholder="Kod Adınız..." />
             <button type="submit" className="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-black p-4 rounded-xl shadow-[0_0_15px_rgba(34,211,238,0.4)] transition-all active:scale-95">SİSTEME SIZ</button>
           </motion.form>
         </div>
@@ -1333,8 +1435,8 @@ export default function CodenamesGame() {
               <h2 className="text-2xl font-black text-white mb-6 flex items-center gap-2">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/20"><Crown size={16} className="text-cyan-300"/></div> ODA KUR
               </h2>
-              <input value={createName} onChange={e => setCreateName(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-xl mb-4 text-white outline-none focus:border-cyan-400 transition-colors placeholder:text-white/30" placeholder="Oda Adı" />
-              <input value={createPass} onChange={e => setCreatePass(e.target.value)} type="password" className="w-full bg-black/40 border border-white/10 p-4 rounded-xl mb-6 text-white outline-none focus:border-cyan-400 transition-colors placeholder:text-white/30" placeholder="Şifre (Opsiyonel)" />
+              <input suppressHydrationWarning value={createName} onChange={e => setCreateName(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-xl mb-4 text-white outline-none focus:border-cyan-400 transition-colors placeholder:text-white/30" placeholder="Oda Adı" />
+              <input suppressHydrationWarning value={createPass} onChange={e => setCreatePass(e.target.value)} type="password" className="w-full bg-black/40 border border-white/10 p-4 rounded-xl mb-6 text-white outline-none focus:border-cyan-400 transition-colors placeholder:text-white/30" placeholder="Şifre (Opsiyonel)" />
               <button onClick={handleCreateRoom} className="w-full bg-cyan-500 hover:bg-cyan-400 p-4 rounded-xl font-black text-black shadow-[0_0_15px_rgba(34,211,238,0.3)] transition-all">OLUŞTUR VE GİR</button>
             </div>
           </div>
@@ -1442,7 +1544,7 @@ export default function CodenamesGame() {
                       <button onClick={() => setShowNameModal(false)} className="absolute top-5 right-5 text-white/50 hover:text-white transition-colors"><X size={22}/></button>
                       <h3 className="text-2xl font-black text-white mb-2">Ajan İsmini Değiştir</h3>
                       <p className="text-white/45 text-sm font-medium mb-6">Lobide görünen isminizi güncelleyin.</p>
-                      <input
+                      <input suppressHydrationWarning
                         autoFocus
                         value={nameModalInput}
                         onChange={(e) => setNameModalInput(e.target.value)}
@@ -1588,7 +1690,7 @@ export default function CodenamesGame() {
 
                       <div className="mt-8 bg-white/5 p-4 rounded-xl border border-white/5">
                          <div className="flex justify-between items-center text-white/50 text-xs font-bold mb-3"><span>Çıkma İhtimali</span> <span className="text-white bg-white/10 px-2 py-0.5 rounded">{['Yok', 'Az', 'Biraz', 'Çok'][customWordProb]}</span></div>
-                         <input type="range" min="0" max="3" step="1" value={customWordProb} onChange={(e) => setCustomWordProb(parseInt(e.target.value))} className="w-full accent-emerald-500 bg-black/50 h-1.5 rounded-full appearance-none outline-none cursor-pointer" />
+                         <input suppressHydrationWarning type="range" min="0" max="3" step="1" value={customWordProb} onChange={(e) => setCustomWordProb(parseInt(e.target.value))} className="w-full accent-emerald-500 bg-black/50 h-1.5 rounded-full appearance-none outline-none cursor-pointer" />
                          <div className="flex justify-between text-[10px] font-bold text-white/40 mt-3 px-1">
                             <span className={customWordProb === 0 ? 'text-emerald-400' : ''}>Yok</span>
                             <span className={customWordProb === 1 ? 'text-emerald-400' : ''}>Az</span>
@@ -1665,7 +1767,7 @@ export default function CodenamesGame() {
                                 <div className="flex items-center gap-3 w-full">
                                    <div className="w-4 h-4 rounded-full bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.8)] shrink-0"></div>
                                    {isEditingRed ? (
-                                       <input autoFocus value={localRedName} onChange={(e) => setLocalRedName(e.target.value)} onBlur={() => { setIsEditingRed(false); broadcastSync({...room, settings: {...room.settings, redName: localRedName}}); }} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} className="bg-black/50 text-white font-black text-xl w-full border border-red-500/50 rounded-lg px-3 py-1 outline-none uppercase tracking-wide focus:ring-2 focus:ring-red-500/50"/>
+                                       <input suppressHydrationWarning autoFocus value={localRedName} onChange={(e) => setLocalRedName(e.target.value)} onBlur={() => { setIsEditingRed(false); broadcastSync({...room, settings: {...room.settings, redName: localRedName}}); }} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} className="bg-black/50 text-white font-black text-xl w-full border border-red-500/50 rounded-lg px-3 py-1 outline-none uppercase tracking-wide focus:ring-2 focus:ring-red-500/50"/>
                                    ) : (
                                        <div className="flex items-center gap-2 group/edit flex-1">
                                            <span className="text-white font-black text-2xl uppercase tracking-wide truncate max-w-[12rem] drop-shadow-md">{localRedName}</span>
@@ -1707,7 +1809,7 @@ export default function CodenamesGame() {
                                 <div className="flex items-center gap-3 w-full">
                                    <div className="w-4 h-4 rounded-full bg-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.8)] shrink-0"></div>
                                    {isEditingBlue ? (
-                                       <input autoFocus value={localBlueName} onChange={(e) => setLocalBlueName(e.target.value)} onBlur={() => { setIsEditingBlue(false); broadcastSync({...room, settings: {...room.settings, blueName: localBlueName}}); }} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} className="bg-black/50 text-white font-black text-xl w-full border border-cyan-500/50 rounded-lg px-3 py-1 outline-none uppercase tracking-wide focus:ring-2 focus:ring-cyan-500/50"/>
+                                       <input suppressHydrationWarning autoFocus value={localBlueName} onChange={(e) => setLocalBlueName(e.target.value)} onBlur={() => { setIsEditingBlue(false); broadcastSync({...room, settings: {...room.settings, blueName: localBlueName}}); }} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} className="bg-black/50 text-white font-black text-xl w-full border border-cyan-500/50 rounded-lg px-3 py-1 outline-none uppercase tracking-wide focus:ring-2 focus:ring-cyan-500/50"/>
                                    ) : (
                                        <div className="flex items-center gap-2 group/edit flex-1">
                                            <span className="text-white font-black text-2xl uppercase tracking-wide truncate max-w-[12rem] drop-shadow-md">{localBlueName}</span>
@@ -1848,11 +1950,11 @@ export default function CodenamesGame() {
                             <div className="space-y-5 pl-2">
                                <div>
                                  <div className="flex justify-between text-white/50 text-xs font-bold mb-3"><span>Şef Süresi</span> <span className="text-white bg-white/10 px-2 py-0.5 rounded">{(room.settings?.spymasterTime || 60)}s</span></div>
-                                 <input type="range" min="30" max="180" step="10" value={room.settings?.spymasterTime || 60} disabled={!mePlayer?.isHost} onChange={(e) => broadcastSync({...room, settings: {...room.settings, spymasterTime: parseInt(e.target.value)}})} className="w-full accent-violet-500 bg-black/50 h-1.5 rounded-full appearance-none outline-none" />
+                                 <input suppressHydrationWarning type="range" min="30" max="180" step="10" value={room.settings?.spymasterTime || 60} disabled={!mePlayer?.isHost} onChange={(e) => broadcastSync({...room, settings: {...room.settings, spymasterTime: parseInt(e.target.value)}})} className="w-full accent-violet-500 bg-black/50 h-1.5 rounded-full appearance-none outline-none" />
                                </div>
                                <div>
                                  <div className="flex justify-between text-white/50 text-xs font-bold mb-3"><span>Ajan Süresi</span> <span className="text-white bg-white/10 px-2 py-0.5 rounded">{(room.settings?.operativeTime || 60)}s</span></div>
-                                 <input type="range" min="30" max="180" step="10" value={room.settings?.operativeTime || 60} disabled={!mePlayer?.isHost} onChange={(e) => broadcastSync({...room, settings: {...room.settings, operativeTime: parseInt(e.target.value)}})} className="w-full accent-cyan-500 bg-black/50 h-1.5 rounded-full appearance-none outline-none" />
+                                 <input suppressHydrationWarning type="range" min="30" max="180" step="10" value={room.settings?.operativeTime || 60} disabled={!mePlayer?.isHost} onChange={(e) => broadcastSync({...room, settings: {...room.settings, operativeTime: parseInt(e.target.value)}})} className="w-full accent-cyan-500 bg-black/50 h-1.5 rounded-full appearance-none outline-none" />
                                </div>
                             </div>
                          </div>
@@ -1871,7 +1973,7 @@ export default function CodenamesGame() {
                                </button>
                             </div>
                             <div className="flex gap-2 mb-3">
-                               <input value={kickChannelName} onChange={(e) => setKickChannelName(e.target.value)} disabled={kickConfirmed || !mePlayer?.isHost} className="flex-1 bg-black/40 border border-white/10 p-3 rounded-xl text-sm text-white outline-none focus:border-red-400 transition-colors" placeholder="Kanal adı" />
+                               <input suppressHydrationWarning value={kickChannelName} onChange={(e) => setKickChannelName(e.target.value)} disabled={kickConfirmed || !mePlayer?.isHost} className="flex-1 bg-black/40 border border-white/10 p-3 rounded-xl text-sm text-white outline-none focus:border-red-400 transition-colors" placeholder="Kanal adı" />
                                {mePlayer?.isHost && kickEnabled && (
                                   !kickConfirmed ? 
                                     <button onClick={() => {
@@ -1934,10 +2036,31 @@ export default function CodenamesGame() {
         const redLeft = room.cards?.filter((c: any) => c.color === 'red' && !c.revealed).length || 0;
         const blueLeft = room.cards?.filter((c: any) => c.color === 'blue' && !c.revealed).length || 0;
 
+        const renderBottomClue = () => (
+          <AnimatePresence mode="wait">
+            {!clueBanner && room.currentClue && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.98 }}
+                transition={{ duration: 0.24, ease: "easeOut" }}
+                style={{ willChange: "transform, opacity" }}
+className={`flex-1 min-w-0 h-[5.75rem] max-h-[5.75rem] overflow-hidden border-2 rounded-2xl px-8 py-4 flex items-center justify-center gap-4 text-center ${room.currentTurn === 'red' ? 'bg-red-950/85 border-red-500/70 shadow-[0_6px_0_rgba(127,29,29,0.45),0_0_22px_rgba(239,68,68,0.25)]' : 'bg-cyan-950/85 border-cyan-400/70 shadow-[0_6px_0_rgba(8,47,73,0.45),0_0_22px_rgba(34,211,238,0.25)]'}`}              >
+                <Info size={20} className="shrink-0 text-white/70" />
+                <div className="bottom-clue-word-scroll px-2 pb-1 uppercase font-black tracking-wider leading-none text-white drop-shadow-sm text-2xl md:text-3xl lg:text-5xl">
+  {room.currentClue.word} <span className="opacity-50 text-xl md:text-2xl mx-2">x</span>{room.currentClue.count}
+</div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        );
+
         return (
           <div className="w-[100vw] h-[100vh] bg-gradient-to-b from-black to-[#1a0b2e] flex flex-col text-slate-100 relative overflow-hidden font-sans">
             <GlobalStyles />
+<div className="bg-image-overlay"></div>
             <div className="static-scanlines absolute inset-0 pointer-events-none z-0"></div>
+            <div className="bg-image-overlay"></div>
             {/* MekipHub Neon Background for Game Board */}
             <div className="neon-bg absolute inset-0 pointer-events-none z-0">
               <div className="neon-stars neon-stars-1"></div>
@@ -1989,18 +2112,17 @@ export default function CodenamesGame() {
                {clueBanner && (
                    <div className="fixed inset-0 z-[160] flex items-center justify-center pointer-events-none">
                        <motion.div
-                           layoutId="clue-anim-box"
                            initial={{ scale: 0.5, opacity: 0 }}
                            animate={{ scale: 1, opacity: 1 }}
                            exit={{ scale: 0.8, opacity: 0 }}
                            transition={{ type: "spring", stiffness: 200, damping: 20 }}
                            style={{ willChange: "transform, opacity" }}
-                           className={`px-16 py-10 rounded-[3rem] border-4 shadow-[0_0_100px_rgba(0,0,0,0.8)] flex flex-col items-center backdrop-blur-xl ${clueBanner.team === 'red' ? 'bg-red-950/90 border-red-500' : 'bg-cyan-950/90 border-cyan-400'}`}
+                           className={`max-w-[min(90vw,900px)] px-16 py-10 rounded-[3rem] border-4 shadow-[0_0_100px_rgba(0,0,0,0.8)] flex flex-col items-center backdrop-blur-xl ${clueBanner.team === 'red' ? 'bg-red-950/90 border-red-500' : 'bg-cyan-950/90 border-cyan-400'}`}
                        >
                            <div className="flex items-center gap-3 text-white/50 font-bold mb-4 uppercase tracking-widest text-lg">
                                <Info size={28}/> ŞEF İSTİHBARAT VERDİ
                            </div>
-                           <div className={`text-8xl font-black uppercase tracking-widest drop-shadow-xl ${clueBanner.team === 'red' ? 'text-red-100' : 'text-cyan-100'}`}>
+                           <div className={`max-w-full text-center safe-wrap text-5xl md:text-8xl font-black uppercase tracking-widest leading-tight drop-shadow-xl ${clueBanner.team === 'red' ? 'text-red-100' : 'text-cyan-100'}`}>
                                {clueBanner.word} <span className="opacity-50 text-6xl">x</span>{clueBanner.count}
                            </div>
                        </motion.div>
@@ -2083,7 +2205,7 @@ export default function CodenamesGame() {
                <div className="flex items-center gap-3">
                   <div className="flex items-center gap-2 bg-black/40 px-3 py-1.5 rounded-lg border border-white/5" title="Oyun Sesi">
                       {volume === 0 ? <VolumeX size={16} className="text-white/40"/> : <Volume2 size={16} className="text-cyan-400"/>}
-                      <input 
+                      <input suppressHydrationWarning 
                           type="range" min="0" max="1" step="0.01" 
                           value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} 
                           className="w-16 sm:w-20 h-1.5 bg-white/10 rounded-full appearance-none outline-none accent-cyan-400 cursor-pointer"
@@ -2136,28 +2258,6 @@ export default function CodenamesGame() {
                           <div className="h-full bg-gradient-to-r from-violet-500 to-cyan-400 transition-all duration-1000 ease-linear" style={{ width: `${(turnTimer / (room.turnPhase === 'spymaster' ? room.settings.spymasterTime : room.settings.operativeTime)) * 100}%` }}></div>
                        </div>
                     </div>
-
-                    {/* AKTİF İPUCU */}
-                    <AnimatePresence>
-                        {!clueBanner && room.currentClue && (
-                            <motion.div
-                                layoutId="clue-anim-box"
-                                initial={{ opacity: 0, scale: 0.8 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                exit={{ opacity: 0, scale: 0.8 }}
-                                transition={{ type: "spring", stiffness: 200, damping: 20 }}
-                                style={{ willChange: "transform, opacity" }}
-                                className={`mt-2 bg-white/[0.04] backdrop-blur-md rounded-2xl p-6 border flex flex-col items-center justify-center shadow-lg relative shrink-0 ${room.currentTurn === 'red' ? 'border-red-500/30' : 'border-cyan-500/30'}`}
-                            >
-                                <div className="flex items-center gap-2 text-white/50 text-xs font-bold uppercase tracking-widest mb-2">
-                                    <Info size={16}/> AKTİF İPUCU
-                                </div>
-                                <div className={`text-3xl font-black uppercase tracking-widest text-center ${room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-300'}`}>
-                                    {room.currentClue.word} <span className="opacity-50 text-xl mx-1">x</span>{room.currentClue.count}
-                                </div>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
 
                <AnimatePresence>
                  {winnerBanner && (
@@ -2228,10 +2328,10 @@ export default function CodenamesGame() {
                             let baseOuter = "";
                             let peekPill = "";
                             let peekText = "";
-                            if (card.color === 'red') { baseOuter = "bg-[#651d20] border border-[#9f4a4a]"; peekPill = "bg-[#2a1111] border border-[#b86b62]"; peekText = "text-[#ffe8df] drop-shadow-sm"; }
-                            else if (card.color === 'blue') { baseOuter = "bg-[#1f4c65] border border-[#5f8fa4]"; peekPill = "bg-[#102333] border border-[#78aabc]"; peekText = "text-[#e5f8ff] drop-shadow-sm"; }
-                            else if (card.color === 'neutral') { baseOuter = "bg-[#cfc5ad] border border-[#a99d80]"; peekPill = "bg-[#ddd2b9] border border-[#9f9274]"; peekText = "text-[#332d22]"; }
-                            else { baseOuter = "bg-zinc-900 border border-zinc-500"; peekPill = "bg-black/90 border border-white/20"; peekText = "text-white"; }
+                            if (card.color === 'red') { baseOuter = "bg-[#651d20] border border-[#9f4a4a]"; peekPill = "bg-[#2a1111] border-2 border-[#b86b62]"; peekText = "text-[#ffe8df] drop-shadow-sm"; }
+                            else if (card.color === 'blue') { baseOuter = "bg-[#1f4c65] border border-[#5f8fa4]"; peekPill = "bg-[#102333] border-2 border-[#78aabc]"; peekText = "text-[#e5f8ff] drop-shadow-sm"; }
+                            else if (card.color === 'neutral') { baseOuter = "bg-[#cfc5ad] border border-[#a99d80]"; peekPill = "bg-[#ddd2b9] border-2 border-[#9f9274]"; peekText = "text-[#332d22]"; }
+                            else { baseOuter = "bg-zinc-900 border border-zinc-500"; peekPill = "bg-black/90 border-2 border-white/20"; peekText = "text-white"; }
                             
                             return { 
                                 outer: baseOuter, 
@@ -2241,14 +2341,14 @@ export default function CodenamesGame() {
                         }
 
                         if (showColor) {
-                            if (card.color === 'red') return { outer: "bg-[#651d20] border-2 border-[#9f4a4a] shadow-[0_0_26px_rgba(101,29,32,0.28)]", pill: "bg-[#2a1111] border border-[#b86b62]", text: "text-[#ffe8df] drop-shadow-sm" };
-                            if (card.color === 'blue') return { outer: "bg-[#1f4c65] border-2 border-[#5f8fa4] shadow-[0_0_30px_rgba(31,76,101,0.32)]", pill: "bg-[#102333] border border-[#78aabc]", text: "text-[#e5f8ff] drop-shadow-sm" };
-                            if (card.color === 'neutral') return { outer: "bg-[#cfc5ad] border-2 border-[#a99d80] shadow-[0_0_22px_rgba(207,197,173,0.20)] backdrop-blur-md", pill: "bg-[#ddd2b9] border border-[#9f9274]", text: "text-[#332d22] drop-shadow-sm" };
-                            return { outer: "bg-[#07070b] border-2 border-red-500/80 shadow-[0_0_28px_rgba(239,68,68,0.24)]", pill: "bg-red-950/95 border border-red-400/80", text: "text-white drop-shadow-sm" };
+                            if (card.color === 'red') return { outer: "bg-[#651d20] border-2 border-[#9f4a4a] shadow-[0_0_26px_rgba(101,29,32,0.28)]", pill: "bg-[#2a1111] border-2 border-[#b86b62]", text: "text-[#ffe8df] drop-shadow-sm" };
+                            if (card.color === 'blue') return { outer: "bg-[#1f4c65] border-2 border-[#5f8fa4] shadow-[0_0_30px_rgba(31,76,101,0.32)]", pill: "bg-[#102333] border-2 border-[#78aabc]", text: "text-[#e5f8ff] drop-shadow-sm" };
+                            if (card.color === 'neutral') return { outer: "bg-[#cfc5ad] border-2 border-[#a99d80] shadow-[0_0_22px_rgba(207,197,173,0.20)] backdrop-blur-md", pill: "bg-[#ddd2b9] border-2 border-[#9f9274]", text: "text-[#332d22] drop-shadow-sm" };
+                            return { outer: "bg-[#07070b] border-2 border-red-500/80 shadow-[0_0_28px_rgba(239,68,68,0.24)]", pill: "bg-red-950/95 border-2 border-red-400/80", text: "text-white drop-shadow-sm" };
                         }
 
                         // OYUN İÇİNDE AJANLARIN GÖRDÜĞÜ KAPALI KARTLAR (KREM VE TAM OPAK)
-                        return { outer: "bg-[#cfc5ad] border-2 border-[#a99d80] shadow-[0_6px_0_rgba(92,80,56,0.42),0_0_18px_rgba(207,197,173,0.16)]", pill: "bg-[#ddd2b9] text-[#2f2a20] border border-[#9f9274]", text: "text-[#332d22] font-black drop-shadow-sm" };
+                        return { outer: "bg-[#cfc5ad] border-2 border-[#a99d80] shadow-[0_6px_0_rgba(92,80,56,0.42),0_0_18px_rgba(207,197,173,0.16)]", pill: "bg-[#ddd2b9] text-[#2f2a20] border-2 border-[#9f9274]", text: "text-[#332d22] font-black drop-shadow-sm" };
                       };
                       
                       const style = getCardStyle();
@@ -2297,7 +2397,7 @@ export default function CodenamesGame() {
                           : { duration: 0 };
 
                       return (
-                        <div key={card.id} className="relative z-10 w-full h-full min-h-0">
+                        <div key={card.id} className="relative z-10 w-full h-full min-h-0 garage-card-perspective">
                             <motion.div
                               onClick={() => {
                                 if (isActuallyRevealed) {
@@ -2319,27 +2419,29 @@ export default function CodenamesGame() {
                               whileHover={(!isActuallyRevealed && !amISpymaster && isMyTurn && isOperativeTurn && !isGameOver) ? { y: -2, boxShadow: '0 8px 15px rgba(0,0,0,0.3)' } : {}}
                               whileTap={(!isActuallyRevealed && !amISpymaster && isMyTurn && isOperativeTurn && !isGameOver) ? { y: 2, boxShadow: '0 0 0 transparent' } : {}}
                               style={{ willChange: "transform, opacity" }}
-                              className={`absolute inset-0 rounded-xl flex items-center justify-center cursor-pointer select-none transition-all duration-200 overflow-hidden group p-2 ${style.outer} ${isActuallyRevealed ? 'shadow-none' : ''}`}
+                              className={`absolute inset-0 rounded-xl flex items-center justify-center cursor-pointer select-none transition-all duration-200 overflow-visible group p-2 ${style.outer} ${isActuallyRevealed ? 'shadow-none' : ''}`}
                             >
                               {!isActuallyRevealed && (
                                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.045] z-0">
-                                    <span className="font-black text-2xl md:text-3xl lg:text-4xl tracking-[0.3em] text-white uppercase select-none drop-shadow-md">MEKIP</span>
+                                    <span className="font-black text-2xl md:text-3xl lg:text-5xl tracking-[0.3em] text-white uppercase select-none drop-shadow-md">MEKIP</span>
                                  </div>
                               )}
                               
                               {isActuallyRevealed && (
                                  <motion.div 
-                                   initial={{ height: '100%' }}
-                                   animate={{ height: isPeeked ? '70%' : '100%' }} 
-                                   transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-                                   className={`absolute top-0 left-0 w-full bg-cover bg-center z-10 transition-opacity duration-300 ${isPeeked ? 'pointer-events-none' : 'opacity-100'}`}
-                                   style={{ backgroundImage: `url(/cards/${imgColor}/${card.designId}.png)`, willChange: "height" }}
+                                   initial={{ rotateX: 0, y: 0, scale: 1 }}
+                                   animate={{ rotateX: isPeeked ? 55 : 0, y: isPeeked ? -5 : 0, scale: isPeeked ? 1.01 : 1 }} 
+                                   transition={{ type: 'spring', stiffness: 280, damping: 24 }}
+                                   className={`absolute inset-0 w-full h-full bg-cover bg-center z-10 rounded-xl transition-opacity duration-300 garage-card-door ${isPeeked ? 'pointer-events-none shadow-[0_22px_42px_rgba(0,0,0,0.42)]' : 'opacity-100'}`}
+                                   style={{ backgroundImage: `url(/cards/${imgColor}/${card.designId}.png)`, willChange: "transform, opacity" }}
                                  />
                               )}
 
                               {(!isActuallyRevealed || isPeeked) && (
-                                  <div className={`w-[88%] absolute bottom-2 flex justify-center py-1.5 shadow-sm z-20 rounded-lg backdrop-blur-md transition-all duration-300 ${style.pill}`}>
-                                      <span className={`font-black text-sm md:text-base tracking-widest uppercase leading-none ${style.text || ''}`}>{card.word}</span>
+                                  <div className={`w-[96%] min-h-[3.15rem] max-h-[3.35rem] absolute bottom-2.5 flex items-center justify-center px-3 py-2.5 shadow-sm z-20 rounded-xl backdrop-blur-md transition-all duration-300 overflow-hidden ${style.pill}`}>
+                                      <div className="card-word-pill-scroll">
+                                          <span className={`block min-w-max text-center font-black text-lg md:text-xl tracking-wider uppercase leading-tight whitespace-nowrap ${style.text || ''}`}>{card.word}</span>
+                                      </div>
                                   </div>
                               )}
 
@@ -2392,39 +2494,37 @@ export default function CodenamesGame() {
                          </div>
                      ) : mePlayer?.role === 'spymaster' && isMyTurn && isSpymasterTurn && !room.status.includes('_won') ? (
                         <>
-                           <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl p-2 flex shadow-lg transition-all focus-within:border-cyan-400/50 focus-within:bg-white/[0.06]">
-                              <div className="pl-4 pr-2 flex items-center text-white/30"><Pencil size={20}/></div>
-                              <input 
+                           <div className="flex-1 bg-black/45 backdrop-blur-xl border-2 border-white/20 rounded-2xl p-2.5 flex shadow-[0_0_28px_rgba(34,211,238,0.12)] ring-1 ring-cyan-400/10 transition-all focus-within:border-cyan-300/80 focus-within:bg-black/60 focus-within:shadow-[0_0_34px_rgba(34,211,238,0.28)]">
+                              <div className="pl-4 pr-2 flex items-center text-white/55"><Pencil size={22}/></div>
+                              <input suppressHydrationWarning 
                                 value={clueWord}
                                 onChange={e => setClueWord(e.target.value.replace(/\s/g, ''))}
                                 placeholder="Tek kelimelik ipucu yazın..."
-                                className="flex-1 bg-transparent text-white px-2 py-2.5 outline-none uppercase font-black text-base tracking-widest placeholder:text-white/20 placeholder:font-medium placeholder:tracking-normal"
+                                className="flex-1 bg-transparent text-white px-2 py-2.5 outline-none uppercase font-black text-lg tracking-widest placeholder:text-white/35 placeholder:font-semibold placeholder:tracking-normal"
                               />
                            </div>
-                           <div className="flex items-center bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl overflow-hidden shrink-0 shadow-lg p-2">
+                           <div className="flex items-center bg-black/45 backdrop-blur-xl border-2 border-white/20 rounded-2xl overflow-hidden shrink-0 shadow-[0_0_28px_rgba(34,211,238,0.12)] ring-1 ring-cyan-400/10 p-2 transition-all focus-within:border-cyan-300/80 focus-within:bg-black/60 focus-within:shadow-[0_0_34px_rgba(34,211,238,0.28)]">
                               <button onClick={() => setClueCount(prev => typeof prev === 'number' ? Math.max(1, prev - 1) : 1)} className="w-12 h-12 rounded-xl flex items-center justify-center hover:bg-white/10 text-white font-black transition-colors">-</button>
-                              <input 
+                              <input suppressHydrationWarning 
                                 type="text" 
                                 value={clueCount === 'unlimited' ? '∞' : clueCount}
                                 onChange={e => { const val = parseInt(e.target.value); if (!isNaN(val)) setClueCount(Math.min(9, Math.max(1, val))); }}
-                                className="w-12 bg-transparent text-center text-cyan-300 font-black outline-none text-xl"
+                                className="w-12 bg-transparent text-center text-cyan-200 font-black outline-none text-2xl drop-shadow-[0_0_8px_rgba(34,211,238,0.45)]"
                               />
                               <button onClick={() => setClueCount(prev => typeof prev === 'number' ? Math.min(9, prev + 1) : 1)} className="w-12 h-12 rounded-xl flex items-center justify-center hover:bg-white/10 text-white font-black transition-colors">+</button>
                            </div>
-                           <button onClick={submitClue} disabled={!clueWord} className={`text-white px-8 rounded-2xl font-black text-base tracking-widest transition-all shrink-0 border border-white/10 disabled:border-transparent disabled:from-white/5 disabled:to-white/5 disabled:text-white/20 disabled:shadow-none bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-500 to-red-700 hover:from-red-400 hover:to-red-600 shadow-[0_0_20px_rgba(239,68,68,0.3)]' : 'from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 shadow-[0_0_20px_rgba(34,211,238,0.3)]'}`}>GÖNDER</button>
+                           <button onClick={submitClue} disabled={!clueWord} className={`text-white px-8 py-4 rounded-2xl font-black text-base tracking-widest transition-all shrink-0 border border-white/10 disabled:border-transparent disabled:from-white/5 disabled:to-white/5 disabled:text-white/20 disabled:shadow-none bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-500 to-red-700 hover:from-red-400 hover:to-red-600 shadow-[0_0_20px_rgba(239,68,68,0.3)]' : 'from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 shadow-[0_0_20px_rgba(34,211,238,0.3)]'}`}>GÖNDER</button>
                         </>
                      ) : mePlayer?.role === 'operative' && isMyTurn && isOperativeTurn && !room.status.includes('_won') ? (
-                         <div className="flex w-full gap-3">
-                             <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-8 py-5 flex items-center justify-center text-white/50 text-base font-bold shadow-lg">
-                                 <Search size={20} className="mr-2 text-white/30" /> Takım arkadaşlarınızla istihbaratı tartışıp hedefleri seçin.
-                             </div>
+                         <div className="flex w-full gap-3 min-w-0">
+                             {renderBottomClue()}
                              <button onClick={skipTurn} className={`flex items-center gap-2 text-white px-8 rounded-2xl font-black text-base tracking-widest transition-all shrink-0 border border-white/10 shadow-lg bg-gradient-to-r ${room.currentTurn === 'red' ? 'from-red-900 to-black hover:from-red-800 border-red-500/30' : 'from-cyan-900 to-black hover:from-cyan-800 border-cyan-500/30'}`}>
                                  <FastForward size={20} /> PAS GEÇ
                              </button>
                          </div>
                      ) : (
-                        <div className="flex-1 bg-white/[0.04] backdrop-blur-md border border-white/10 rounded-2xl px-8 py-5 flex items-center justify-center text-white/50 text-base font-bold shadow-lg">
-                            Karşı merkezin hamlesini bekleyin veya takım arkadaşlarınızla istihbaratı tartışın...
+                        <div className="flex w-full gap-3 min-w-0">
+                            {renderBottomClue()}
                         </div>
                      )}
                   </div>
@@ -2460,7 +2560,7 @@ export default function CodenamesGame() {
                           {room.currentClue && (
                              <div className={`mb-5 border p-3 rounded-xl text-sm font-medium text-white/80 shadow-md ${room.currentTurn === 'red' ? 'bg-gradient-to-r from-red-500/20 to-black/20 border-red-500/30' : 'bg-gradient-to-r from-cyan-500/20 to-black/20 border-cyan-500/30'}`}>
                                 <div className="flex items-center gap-2 mb-1.5 opacity-70"><Info size={14}/> Aktif İpucu:</div>
-                                <strong className={`uppercase tracking-wider text-base block ${room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-300'}`}>{room.currentClue.word} <span className="opacity-50">x</span>{room.currentClue.count}</strong>
+                                <strong className={`uppercase tracking-wider text-base block max-w-full leading-tight safe-wrap ${room.currentTurn === 'red' ? 'text-red-400' : 'text-cyan-300'}`}>{room.currentClue.word} <span className="opacity-50">x</span>{room.currentClue.count}</strong>
                              </div>
                           )}
                           <div className="space-y-4">
@@ -2474,20 +2574,20 @@ export default function CodenamesGame() {
                                }
 
                                return (
-                                   <div key={log.id} className="text-xs leading-relaxed relative pl-3 before:absolute before:left-0 before:top-1.5 before:w-1 before:h-1 before:rounded-full before:bg-white/20">
+                                   <div key={log.id} className="text-xs leading-relaxed relative pl-3 before:absolute before:left-0 before:top-1.5 before:w-1 before:h-1 before:rounded-full before:bg-white/20 safe-wrap">
                                       <span className={log.team === 'red' ? 'text-red-400 font-bold' : 'text-cyan-400 font-bold'}>{log.team === 'red' ? 'KRMIZI' : 'MAVİ'}</span>{' '}
                                       <span className="text-white/40 truncate max-w-[50px] inline-block align-bottom">{log.playerName}</span>{' '}
                                       
                                       {log.type === 'clue' ? (
-                                         <span className="text-white/60 text-[11px]">ipucu verdi: <strong className={`uppercase tracking-wider text-xs ${log.team === 'red' ? 'text-red-400' : 'text-cyan-400'}`}>{log.word} <span className="opacity-50 text-[11px]">x</span>{log.count}</strong></span>
+                                         <span className="text-white/60 text-[11px]">ipucu verdi: <strong className={`uppercase tracking-wider text-xs inline-block max-w-full align-bottom leading-tight safe-wrap ${log.team === 'red' ? 'text-red-400' : 'text-cyan-400'}`}>{log.word} <span className="opacity-50 text-[11px]">x</span>{log.count}</strong></span>
                                       ) : log.type === 'timeout' ? (
                                          <span className="text-amber-400 font-bold ml-1">SÜRESİ BİTTİ</span>
                                       ) : log.type === 'pass' ? (
                                          <span className="font-bold ml-1 text-white/50 bg-white/10 px-1.5 py-0.5 rounded">PAS GEÇİLDİ</span>
                                       ) : (
                                          <div className="mt-1 bg-black/20 p-1.5 rounded-lg border border-white/5">
-                                            {log.relatedClue && <div className="text-[10px] text-white/30 uppercase mb-0.5 leading-none">'{log.relatedClue}' için açıldı:</div>}
-                                            <span className={`uppercase font-black tracking-wider ${wordColorClass}`}>{log.word}</span>
+                                            {log.relatedClue && <div className="text-[10px] text-white/30 uppercase mb-0.5 leading-tight safe-wrap">'{log.relatedClue}' için açıldı:</div>}
+                                            <span className={`uppercase font-black tracking-wider leading-tight safe-wrap ${wordColorClass}`}>{log.word}</span>
                                             <span className={`font-bold ml-2 px-1.5 py-0.5 rounded text-[10px] float-right ${log.color === log.team ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/20' : log.color === 'assassin' ? 'bg-red-900/50 text-red-500 border border-red-500/50' : 'bg-amber-500/20 text-amber-400 border border-amber-500/20'}`}>
                                                {log.color === log.team ? 'DOĞRU' : log.color === 'assassin' ? 'SUİKASTÇİ' : 'YANLIŞ'}
                                             </span>
